@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>密码库</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="glow glow-a"></div>
+  <div class="glow glow-b"></div>
+
+  <!-- ============ 解锁 / 初始化 ============ -->
+  <section id="gate" class="gate">
+    <div class="gate-card">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="4" y="10.5" width="16" height="10.5" rx="2.6" />
+          <path d="M8 10.5V7.2a4 4 0 0 1 8 0v3.3" />
+          <circle cx="12" cy="15.8" r="1.35" fill="currentColor" stroke="none" />
+        </svg>
+      </div>
+      <h1 id="gate-title">密码库</h1>
+      <p id="gate-sub" class="gate-sub">输入主密码以解锁</p>
+
+      <form id="gate-form" autocomplete="off">
+        <div class="field">
+          <input id="pwd" type="password" placeholder="主密码" spellcheck="false" />
+          <button type="button" class="peek" id="peek" tabindex="-1" aria-label="显示密码">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12Z"/><circle cx="12" cy="12" r="2.6"/></svg>
+          </button>
+        </div>
+        <div class="field hidden" id="pwd2-wrap">
+          <input id="pwd2" type="password" placeholder="再次输入主密码" spellcheck="false" />
+        </div>
+        <div class="strength hidden" id="strength">
+          <div class="strength-bar"><i></i><i></i><i></i><i></i></div>
+          <span id="strength-label">强度</span>
+        </div>
+        <button id="gate-submit" class="primary" type="submit">解锁</button>
+        <p id="gate-error" class="error"></p>
+      </form>
+      <p class="hint">仅存本机 · AES-256 加密 · 不联网</p>
+    </div>
+  </section>
+
+  <!-- ============ 主界面 ============ -->
+  <section id="main" class="main hidden">
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <div class="brand">
+          <span class="brand-mark">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="10.5" width="16" height="10.5" rx="2.6"/><path d="M8 10.5V7.2a4 4 0 0 1 8 0v3.3"/></svg>
+          </span>
+          <span>密码库</span>
+        </div>
+        <div class="head-actions">
+          <button id="lock-btn" class="icon-btn" title="锁定  ⌘L">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4.5" y="10.5" width="15" height="10" rx="2.4"/><path d="M8.2 10.5V7.4a3.8 3.8 0 0 1 7.6 0v3.1"/></svg>
+          </button>
+          <button id="menu-btn" class="icon-btn" title="设置">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3.1"/><path d="M12 3.2v2.1M12 18.7v2.1M4.8 4.8l1.5 1.5M17.7 17.7l1.5 1.5M3.2 12h2.1M18.7 12h2.1M4.8 19.2l1.5-1.5M17.7 6.3l1.5-1.5"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="search-wrap">
+        <svg class="search-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="11" cy="11" r="6.4"/><path d="m16 16 4.2 4.2"/></svg>
+        <input id="search" placeholder="搜索…" spellcheck="false" />
+        <kbd id="search-kbd">⌘K</kbd>
+      </div>
+
+      <div class="filters" id="filters"></div>
+      <div class="list" id="list"></div>
+
+      <div class="sidebar-foot">
+        <span id="count" class="count">0 条</span>
+        <button id="add-btn" class="add-btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5.5v13M5.5 12h13"/></svg>
+          新建
+        </button>
+      </div>
+    </aside>
+
+    <main class="detail" id="detail"></main>
+  </section>
+
+  <div id="toast" class="toast"></div>
+
+  <!-- 生成器 / 设置 弹层 -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-card" id="modal-card"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

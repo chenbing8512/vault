@@ -1,0 +1,15 @@
+{
+  "name": "vault",
+  "private": true,
+  "version": "1.0.0",
+  "description": "本地离线加密密码库",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:mac": "tauri build --bundles app,dmg",
+    "build:win": "tauri build --bundles nsis"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0"
+  }
+}
