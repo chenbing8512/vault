@@ -1,9 +1,15 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="aurora">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>密码库</title>
+  <script>
+    try {
+      var p = JSON.parse(localStorage.getItem('vault.prefs') || '{}');
+      if (p.theme) document.documentElement.setAttribute('data-theme', p.theme);
+    } catch (e) {}
+  </script>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -75,10 +81,18 @@
 
       <div class="sidebar-foot">
         <span id="count" class="count">0 条</span>
-        <button id="add-btn" class="add-btn">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5.5v13M5.5 12h13"/></svg>
-          新建
-        </button>
+        <div class="foot-actions">
+          <button id="audit-btn" class="icon-btn" title="密码体检">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 3l7 3v6c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V6l7-3Z"/><path d="m9 12 2 2 4-4"/></svg>
+          </button>
+          <button id="trash-btn" class="icon-btn" title="回收站">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4.5 7h15M9.5 7V4.8h5V7M6.5 7l.8 12.2A2 2 0 0 0 9.3 21h5.4a2 2 0 0 0 2-1.8L17.5 7"/></svg>
+          </button>
+          <button id="add-btn" class="add-btn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5.5v13M5.5 12h13"/></svg>
+            新建
+          </button>
+        </div>
       </div>
     </aside>
 
@@ -87,10 +101,11 @@
 
   <div id="toast" class="toast"></div>
 
-  <!-- 生成器 / 设置 弹层 -->
   <div id="modal" class="modal hidden">
     <div class="modal-card" id="modal-card"></div>
   </div>
+
+  <input type="file" id="file-input" accept=".csv,.json" class="hidden" />
 
   <script src="app.js"></script>
 </body>

@@ -395,6 +395,31 @@ mod tests {
     }
 }
 
+#[tauri::command]
+fn export_text(content: String, filename: String) -> Result<String, String> {
+    let safe: String = filename
+        .chars()
+        .filter(|c| !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        .collect();
+    let name = if safe.trim().is_empty() {
+        "export.txt".to_string()
+    } else {
+        safe
+    };
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| "无法定位用户目录".to_string())?;
+    let desktop = PathBuf::from(&home).join("Desktop");
+    let dir = if desktop.is_dir() {
+        desktop
+    } else {
+        PathBuf::from(home)
+    };
+    let target = dir.join(name);
+    fs::write(&target, content.as_bytes()).map_err(|e| format!("写入失败：{e}"))?;
+    Ok(target.display().to_string())
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -421,7 +446,8 @@ fn main() {
             change_password,
             export_backup,
             list_backups,
-            restore_backup
+            restore_backup,
+            export_text
         ])
         .run(tauri::generate_context!())
         .expect("应用启动失败");
