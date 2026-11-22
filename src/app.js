@@ -102,6 +102,7 @@ const state = {
   items: [],
   vaults: [DEFAULT_VAULT],
   folders: [],
+  tags: [],
   curVaultId: DEFAULT_VAULT.id,
   selectedId: null,
   filter: 'all',
@@ -397,10 +398,11 @@ function downloadBlob(text, filename) {
 
 function serialize() {
   return JSON.stringify({
-    version: 3,
+    version: 4,
     items: state.items,
     vaults: state.vaults,
     folders: state.folders,
+    tags: state.tags,
     curVaultId: state.curVaultId,
     settings: {},
   });
@@ -485,6 +487,20 @@ function loadData(data) {
     if (!vaultIds.has(i.vaultId)) i.vaultId = state.vaults[0].id;
     if (i.folderId && !folderIds.has(i.folderId)) i.folderId = null;
   });
+
+  /* 标签表（v4 新增）：name 全局唯一，color 可空表示跟随主题。
+     v1~v3 数据没有这张表，从条目里把用过的标签补登记回来。 */
+  const tagSeen = new Set();
+  state.tags = [];
+  const pushTag = (name, color) => {
+    const n = normTag(name);
+    if (!n || tagSeen.has(n)) return;
+    tagSeen.add(n);
+    state.tags.push({ name: n, color: safeColor(color) });
+  };
+  (Array.isArray(raw.tags) ? raw.tags : []).forEach((t) => pushTag(t && t.name, t && t.color));
+  state.items.forEach((i) => (i.tags || []).forEach((t) => pushTag(t, '')));
+
   state.curVaultId = state.vaults.some((v) => v.id === raw.curVaultId) ? raw.curVaultId : state.vaults[0].id;
 }
 
@@ -554,10 +570,41 @@ function sameSiteItems(item) {
   );
 }
 
+/* ---------------- 标签 ---------------- */
+const TAG_COLORS = ['', '#6f8cff', '#46d39a', '#f5a623', '#ff6b6b', '#c084fc', '#38bdf8'];
+
+/* 归一：去 #、折叠空白、限 20 字 */
+function normTag(v) {
+  return String(v == null ? '' : v).trim().replace(/^#+/, '').trim().replace(/\s+/g, ' ').slice(0, 20);
+}
+/* 只接受 #rgb / #rrggbb(aa)，挡掉注入 */
+function safeColor(c) {
+  const s = String(c || '').trim();
+  return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(s) ? s : '';
+}
+const tagRecord = (name) => state.tags.find((t) => t.name === name) || null;
+const tagColorOf = (name) => { const r = tagRecord(name); return r ? r.color || '' : ''; };
+
+/* 登记一个标签，已存在则原样返回 */
+function ensureTag(name, color) {
+  const n = normTag(name);
+  if (!n) return null;
+  let r = tagRecord(n);
+  if (!r) { r = { name: n, color: safeColor(color) }; state.tags.push(r); }
+  return r;
+}
+
+/* 当前库里用到该标签的条目数 */
+const tagUsage = (name) => vaultLive().filter((i) => (i.tags || []).includes(name)).length;
+
+/* 全部标签（含 0 条目的空标签），按用量降序 */
 function allTags() {
   const map = new Map();
+  state.tags.forEach((t) => map.set(t.name, 0));
   vaultLive().forEach((i) => (i.tags || []).forEach((t) => map.set(t, (map.get(t) || 0) + 1)));
-  return Array.from(map.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh'));
+  return Array.from(map.entries())
+    .map(([name, count]) => ({ name, count, color: tagColorOf(name) }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh'));
 }
 
 /* ---------------- 门禁 ---------------- */
@@ -815,6 +862,17 @@ function renderFolderTree() {
   box.innerHTML = walk(roots, 0);
 }
 
+const TAG_SIDE_LIMIT = 14;
+
+function tagChipHtml(t) {
+  const on = state.scope.type === 'tag' && state.scope.id === t.name;
+  return `<button class="tag-mini ${on ? 'on' : ''}" data-tag="${escapeHtml(t.name)}"
+      title="右键管理「${escapeHtml(t.name)}」">
+    ${t.color ? `<i class="tag-dot" style="background:${t.color}"></i>` : ''}
+    <span class="tag-txt">${escapeHtml(t.name)}</span><span class="tag-n">${t.count}</span>
+  </button>`;
+}
+
 function renderTags() {
   const tags = allTags();
   const box = $('#tag-list');
@@ -822,9 +880,207 @@ function renderTags() {
     box.innerHTML = `<div class="tag-empty">给条目加标签，之后能跨文件夹筛</div>`;
     return;
   }
-  box.innerHTML = tags.slice(0, 14).map(([t, n]) =>
-    `<button class="tag-mini ${state.scope.type === 'tag' && state.scope.id === t ? 'on' : ''}" data-tag="${escapeHtml(t)}">${escapeHtml(t)}<span style="opacity:.55;margin-left:4px">${n}</span></button>`
-  ).join('');
+  box.innerHTML = tags.slice(0, TAG_SIDE_LIMIT).map(tagChipHtml).join('')
+    + (tags.length > TAG_SIDE_LIMIT
+      ? `<button class="tag-mini tag-more" data-tag-manage="1">全部 ${tags.length} 个 ›</button>`
+      : '');
+}
+
+/* ---------------- 标签管理 ---------------- */
+/* 改完标签后的统一刷新：侧栏 → 列表 → 详情 → 落盘 */
+function tagRefresh() {
+  renderNav();
+  renderFilters();
+  renderList();
+  renderDetail();
+  persist();
+}
+
+async function createTagDialog() {
+  const r = await promptDialog({
+    title: '新建标签',
+    desc: '建好的空标签会出现在侧栏，条目详情里可以直接勾选。',
+    fields: [{ key: 'name', placeholder: '例如 客户 / 运维 / 待办', value: '' }],
+    okText: '创建',
+  });
+  if (!r) return;
+  const n = normTag(r.name);
+  if (!n) return;
+  if (tagRecord(n)) { toast('标签「' + n + '」已存在', 'err'); return; }
+  ensureTag(n);
+  tagRefresh();
+  toast('已新建标签「' + n + '」');
+}
+
+/* 详情页给条目挂一个标签（同时登记到标签表） */
+function addTagToItem(item, raw) {
+  const n = normTag(raw);
+  if (!n) return false;
+  item.tags = item.tags || [];
+  if (!item.tags.includes(n)) {
+    item.tags.push(n);
+    ensureTag(n);
+  }
+  item.updatedAt = Date.now();
+  tagRefresh();
+  const t = $('#tag-input');
+  if (t) t.focus();
+  return true;
+}
+
+/* 重命名 / 合并共用：条目上的 from 全部换成 to */
+function applyRename(from, to) {
+  state.items.forEach((i) => {
+    if (!Array.isArray(i.tags) || !i.tags.includes(from)) return;
+    const next = i.tags.filter((t) => t !== from);
+    if (!next.includes(to)) next.push(to);
+    i.tags = next;
+  });
+  const src = tagRecord(from);
+  const dst = tagRecord(to);
+  if (dst) state.tags = state.tags.filter((t) => t.name !== from);
+  else if (src) src.name = to;
+  else ensureTag(to);
+  if (state.scope.type === 'tag' && state.scope.id === from) state.scope = { type: 'tag', id: to };
+  tagRefresh();
+}
+
+async function renameTagDialog(name) {
+  const r = await promptDialog({
+    title: '重命名标签',
+    desc: '所有条目上的这个标签会一起改名；若与已有标签同名则自动合并。',
+    fields: [{ key: 'name', value: name, placeholder: '新名称' }],
+    okText: '保存',
+  });
+  if (!r) return false;
+  const n = normTag(r.name);
+  if (!n || n === name) return false;
+  const merged = !!tagRecord(n);
+  applyRename(name, n);
+  toast(merged ? `已合并到「${n}」` : `已改为「${n}」`);
+  return true;
+}
+
+function removeTag(name) {
+  state.items.forEach((i) => {
+    if (Array.isArray(i.tags)) i.tags = i.tags.filter((t) => t !== name);
+  });
+  state.tags = state.tags.filter((t) => t.name !== name);
+  if (state.scope.type === 'tag' && state.scope.id === name) state.scope = { type: 'all', id: null };
+  tagRefresh();
+}
+
+async function deleteTagDialog(name) {
+  const n = tagUsage(name);
+  const ok = await confirmDialog({
+    title: `删除标签「${name}」？`,
+    desc: n ? `会从 ${n} 个条目上移除，条目本身不受影响。` : '这个标签还没挂在任何条目上。',
+    okText: '删除',
+    danger: true,
+  });
+  if (!ok) return false;
+  removeTag(name);
+  toast('已删除标签「' + name + '」');
+  return true;
+}
+
+function cycleTagColor(name) {
+  const r = ensureTag(name);
+  if (!r) return;
+  const idx = TAG_COLORS.indexOf(r.color || '');
+  r.color = TAG_COLORS[(idx + 1) % TAG_COLORS.length];
+  tagRefresh();
+  toast(r.color ? '已换颜色' : '颜色跟随主题');
+}
+
+/* 把一个标签合并到另一个（菜单里选） */
+function openMergeMenu(anchor, from) {
+  const others = state.tags.filter((t) => t.name !== from).map((t) => t.name);
+  if (!others.length) { toast('还没有其它标签可以合并', 'err'); return; }
+  showMenu(anchor, [
+    { label: `把「${from}」合并到` },
+    ...others.map((n) => ({ text: n, onClick: () => { applyRename(from, n); toast(`已合并到「${n}」`); openTagManager(); } })),
+  ]);
+}
+
+/* 标签 chip 右键菜单 */
+function openTagMenu(anchor, name) {
+  showMenu(anchor, [
+    { label: '#' + name },
+    { text: '只看这个标签', icon: ICONS.tag, onClick: () => setScope('tag', name) },
+    { sep: true },
+    { text: '重命名…', icon: ICONS.refresh, onClick: async () => { if (await renameTagDialog(name)) openTagMenuNeeded(); } },
+    { text: '换颜色', icon: ICONS.eye, onClick: () => cycleTagColor(name) },
+    { text: '管理所有标签…', icon: ICONS.layers, onClick: () => openTagManager() },
+    { sep: true },
+    { text: '删除标签', icon: ICONS.trash, danger: true, onClick: async () => { if (await deleteTagDialog(name)) openTagMenuNeeded(); } },
+  ]);
+}
+function openTagMenuNeeded() {
+  if (!$('#modal').classList.contains('hidden')) openTagManager();
+}
+
+/* 标签管理面板 */
+function openTagManager() {
+  const card = $('#modal-card');
+  const prevScroll = $('#tm-list') ? $('#tm-list').scrollTop : 0;
+  /* 自愈：条目上用到但没登记的标签先补登记 */
+  allTags().forEach((t) => ensureTag(t.name, t.color));
+  const rows = allTags();
+  card.classList.add('wide');
+  card.innerHTML = `
+    <h3>管理标签</h3>
+    <p class="modal-sub">标签跨文件夹通用，可以先建好再往条目上挂。右键侧栏标签也能直接改。</p>
+    <div class="tag-mgr-add">
+      <input id="tm-new" placeholder="新标签名称，回车创建" spellcheck="false" maxlength="20" />
+      <button class="primary" id="tm-add" style="width:auto;padding:0 14px;height:34px;margin:0">新建</button>
+    </div>
+    <div class="tag-mgr-list" id="tm-list">
+      ${rows.length ? rows.map((t) => `
+        <div class="tag-row" data-trow="${escapeHtml(t.name)}">
+          <button class="tag-swatch" data-swatch="${escapeHtml(t.name)}" title="点击换颜色"
+            style="${t.color ? `background:${t.color}` : ''}"></button>
+          <span class="tag-row-name">${escapeHtml(t.name)}</span>
+          <span class="tag-row-n">${t.count} 条</span>
+          <button class="row-act" data-trename="${escapeHtml(t.name)}">重命名</button>
+          <button class="row-act" data-tmerge="${escapeHtml(t.name)}">合并</button>
+          <button class="row-act danger" data-tdel="${escapeHtml(t.name)}">删除</button>
+        </div>`).join('') : '<div class="tag-mgr-empty">还没有标签，上面输入框建第一个</div>'}
+    </div>
+    <div class="modal-actions"><button class="ghost-btn" id="tm-close">关闭</button></div>`;
+  $('#modal').classList.remove('hidden');
+
+  const list = $('#tm-list');
+  if (list) list.scrollTop = prevScroll;
+  const input = $('#tm-new');
+
+  const commit = async () => {
+    const n = normTag(input.value);
+    if (!n) return;
+    if (tagRecord(n)) { toast('标签「' + n + '」已存在', 'err'); return; }
+    ensureTag(n);
+    tagRefresh();
+    openTagManager();
+    toast('已新建标签「' + n + '」');
+  };
+  $('#tm-add').addEventListener('click', commit);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } });
+  $('#tm-close').addEventListener('click', closeModal);
+  setTimeout(() => input.focus(), 60);
+
+  $$('[data-swatch]').forEach((b) => b.addEventListener('click', () => {
+    cycleTagColor(b.dataset.swatch);
+    openTagManager();
+  }));
+  $$('[data-trename]').forEach((b) => b.addEventListener('click', async () => {
+    await renameTagDialog(b.dataset.trename);
+    openTagManager();
+  }));
+  $$('[data-tmerge]').forEach((b) => b.addEventListener('click', () => openMergeMenu(b, b.dataset.tmerge)));
+  $$('[data-tdel]').forEach((b) => b.addEventListener('click', async () => {
+    await deleteTagDialog(b.dataset.tdel);
+    openTagManager();
+  }));
 }
 
 function setScope(type, id) {
@@ -855,6 +1111,9 @@ document.addEventListener('click', (e) => {
     renderFolderTree();
     return;
   }
+
+  const tagManage = e.target.closest('[data-tag-manage]');
+  if (tagManage) { openTagManager(); return; }
 
   const tagBtn = e.target.closest('[data-tag]');
   if (tagBtn) { setScope('tag', tagBtn.dataset.tag); return; }
@@ -890,6 +1149,13 @@ document.addEventListener('contextmenu', (e) => {
   if (fEl) {
     e.preventDefault();
     openFolderMenu(fEl, fEl.dataset.sid, 'folder');
+    return;
+  }
+
+  const tEl = e.target.closest('#tag-list [data-tag]');
+  if (tEl) {
+    e.preventDefault();
+    openTagMenu(tEl, tEl.dataset.tag);
     return;
   }
 
@@ -1427,6 +1693,7 @@ function renderDetail() {
         ${tags.map((t) => `<span class="tag-pill">${escapeHtml(t)}<button data-rmtag="${escapeHtml(t)}" title="移除">${ICONS.x}</button></span>`).join('')}
         <input class="tag-input" id="tag-input" placeholder="${tags.length ? '再加一个…' : '输入标签后回车'}" spellcheck="false" />
       </div>
+      <div class="tag-suggest hidden" id="tag-suggest"></div>
 
       <div class="section-label">分类</div>
       <div class="type-picker" style="padding-left:2px">
@@ -1579,38 +1846,53 @@ function bindDetail(item, isLogin) {
     showMenu($('#pick-folder'), entries);
   });
 
-  /* 标签：回车添加，点 × 删除 */
+  /* 标签：候选下拉 + 回车添加 + 点 × 删除 */
   const tagInput = $('#tag-input');
+  const tagSuggest = $('#tag-suggest');
   if (tagInput) {
+    const showSuggest = () => {
+      if (!tagSuggest) return;
+      const q = normTag(tagInput.value).toLowerCase();
+      const cands = allTags()
+        .map((t) => t.name)
+        .filter((n) => !(item.tags || []).includes(n) && (!q || n.toLowerCase().includes(q)))
+        .slice(0, 10);
+      if (!cands.length) { tagSuggest.classList.add('hidden'); return; }
+      tagSuggest.innerHTML = cands.map((n) =>
+        `<button class="tag-sug" data-tag-add="${escapeHtml(n)}">${ICONS.tag}<span>${escapeHtml(n)}</span></button>`
+      ).join('');
+      tagSuggest.classList.remove('hidden');
+    };
+    tagInput.addEventListener('focus', showSuggest);
+    tagInput.addEventListener('input', showSuggest);
+    tagInput.addEventListener('blur', () => setTimeout(() => tagSuggest && tagSuggest.classList.add('hidden'), 140));
     tagInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        const v = tagInput.value.trim().replace(/^#/, '').slice(0, 20);
-        if (!v) return;
-        item.tags = item.tags || [];
-        if (!item.tags.includes(v)) item.tags.push(v);
-        touch();
-        persist();
-        renderNav();
-        renderDetail();
-        const t = $('#tag-input');
-        if (t) t.focus();
+        addTagToItem(item, tagInput.value);
+      } else if (e.key === 'Escape') {
+        if (tagSuggest) tagSuggest.classList.add('hidden');
       } else if (e.key === 'Backspace' && !tagInput.value && (item.tags || []).length) {
         item.tags.pop();
         touch();
-        persist();
-        renderNav();
-        renderDetail();
+        tagRefresh();
       }
     });
+    if (tagSuggest) {
+      /* 用 mousedown，赶在 blur 之前 */
+      tagSuggest.addEventListener('mousedown', (e) => {
+        const b = e.target.closest('[data-tag-add]');
+        if (!b) return;
+        e.preventDefault();
+        addTagToItem(item, b.dataset.tagAdd);
+      });
+    }
   }
   $$('[data-rmtag]').forEach((b) =>
     b.addEventListener('click', () => {
       item.tags = (item.tags || []).filter((t) => t !== b.dataset.rmtag);
       touch();
-      persist();
-      renderNav();
-      renderDetail();
+      tagRefresh();
     })
   );
 
@@ -1958,6 +2240,16 @@ $('#add-btn').addEventListener('click', addItem);
 $('#add-folder').addEventListener('click', (e) => {
   e.stopPropagation();
   if (state.unlocked) createFolder(null);
+});
+
+/* 侧栏「标签」标题右侧的 ＋ / ⋯ */
+$('#add-tag').addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (state.unlocked) createTagDialog();
+});
+$('#manage-tags').addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (state.unlocked) openTagManager();
 });
 
 /* ---------------- 搜索 ---------------- */
