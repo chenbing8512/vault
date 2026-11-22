@@ -731,7 +731,9 @@ function showMenu(anchor, items) {
   }).join('');
   pop.classList.remove('hidden');
 
-  const r = anchor.getBoundingClientRect();
+  const r = (anchor && typeof anchor.x === 'number')
+    ? { left: anchor.x, right: anchor.x, top: anchor.y, bottom: anchor.y }
+    : anchor.getBoundingClientRect();
   const w = pop.offsetWidth;
   const h = pop.offsetHeight;
   let left = r.left;
@@ -872,6 +874,31 @@ document.addEventListener('click', (e) => {
   }
 });
 
+/* ---------------- 右键菜单 ---------------- */
+document.addEventListener('contextmenu', (e) => {
+  const itemEl = e.target.closest('#list .item[data-id]');
+  if (itemEl) {
+    e.preventDefault();
+    const it = state.items.find((x) => x.id === itemEl.dataset.id);
+    if (!it) return;
+    selectItem(it.id);
+    openItemMenu(it, e.clientX, e.clientY);
+    return;
+  }
+
+  const fEl = e.target.closest('#folder-tree .nav-item[data-scope="folder"]');
+  if (fEl) {
+    e.preventDefault();
+    openFolderMenu(fEl, fEl.dataset.sid, 'folder');
+    return;
+  }
+
+  /* 输入框保留系统粘贴菜单，其它位置屏蔽 WebView 自带的 Reload 菜单 */
+  if (e.target.closest('input, textarea, [contenteditable="true"]')) return;
+  e.preventDefault();
+  hideMenu();
+});
+
 function openFolderMenu(anchor, id, kind) {
   const f = folderById(id);
   if (!f) return;
@@ -883,6 +910,34 @@ function openFolderMenu(anchor, id, kind) {
     { sep: true },
     { text: '删除文件夹', danger: true, onClick: () => deleteFolder(f.id) },
   ]);
+}
+
+/* 条目右键菜单：收藏 / 归档 / 删除 */
+function openItemMenu(item, x, y) {
+  const entries = [
+    { label: item.title || '未命名' },
+    {
+      text: item.favorite ? '取消收藏' : '收藏',
+      icon: item.favorite ? ICONS.starOn : ICONS.star,
+      onClick: () => toggleFavorite(item),
+    },
+    {
+      text: item.archivedAt ? '取消归档' : '归档',
+      icon: ICONS.archive,
+      onClick: () => toggleArchive(item),
+    },
+  ];
+
+  if (item.kind === 'login') {
+    entries.push({ sep: true });
+    if (item.username) entries.push({ text: '复制用户名', icon: ICONS.copy, onClick: () => copyText(item.username, '用户名已复制') });
+    if (item.password) entries.push({ text: '复制密码', icon: ICONS.copy, onClick: () => copySecret(item.password) });
+  }
+
+  entries.push({ sep: true });
+  entries.push({ text: '移到回收站', icon: ICONS.trash, danger: true, onClick: () => deleteItem(item) });
+
+  showMenu({ x, y }, entries);
 }
 
 function renderFilters() {
@@ -1585,22 +1640,7 @@ function bindDetail(item, isLogin) {
     $('#f-fav').innerHTML = item.favorite ? ICONS.starOn : ICONS.star;
   });
 
-  $('#f-del').addEventListener('click', async () => {
-    const ok = await confirmDialog({
-      title: '移到回收站？',
-      desc: `「${escapeHtml(item.title || '未命名')}」会被移到回收站，可以随时恢复。`,
-      okText: '移到回收站',
-      danger: true,
-    });
-    if (!ok) return;
-    item.deletedAt = Date.now();
-    persist(true);
-    const next = visibleItems()[0];
-    state.selectedId = next ? next.id : null;
-    renderList();
-    renderDetail();
-    toast('已移到回收站');
-  });
+  $('#f-del').addEventListener('click', () => deleteItem(item));
 
   $('#add-field').addEventListener('click', async () => {
     const r = await promptDialog({
@@ -1704,6 +1744,34 @@ function duplicateItem(item, asNewAccount) {
   toast(asNewAccount ? '已为同一网站新建账号，填上用户名即可' : '已复制条目', 'ok');
 }
 
+function toggleFavorite(item) {
+  item.favorite = !item.favorite;
+  item.updatedAt = Date.now();
+  persist();
+  renderList();
+  renderDetail();
+  toast(item.favorite ? '已收藏' : '已取消收藏', 'ok');
+}
+
+async function deleteItem(item) {
+  const ok = await confirmDialog({
+    title: '移到回收站？',
+    desc: `「${escapeHtml(item.title || '未命名')}」会被移到回收站，可以随时恢复。`,
+    okText: '移到回收站',
+    danger: true,
+  });
+  if (!ok) return;
+  item.deletedAt = Date.now();
+  item.updatedAt = Date.now();
+  persist(true);
+  const next = visibleItems()[0];
+  state.selectedId = next ? next.id : null;
+  renderNav();
+  renderList();
+  renderDetail();
+  toast('已移到回收站');
+}
+
 function toggleArchive(item) {
   item.archivedAt = item.archivedAt ? null : Date.now();
   item.updatedAt = Date.now();
@@ -1732,7 +1800,7 @@ function renderOtpArea(item) {
   const box = $('#otp-area');
   if (!box) return;
   if (!item.otp) {
-    box.innerHTML = `<div style="font-size:12.5px;color:var(--faint);padding:4px 2px">未绑定。绑定后这里会显示每 30 秒刷新的动态验证码。</div>`;
+    box.innerHTML = `<div style="font-size:13.5px;color:var(--muted);padding:4px 2px;line-height:1.7">未绑定。绑定后这里会显示每 30 秒刷新的动态验证码。</div>`;
     return;
   }
   const C = 2 * Math.PI * 9.5;
@@ -1770,7 +1838,7 @@ function renderFieldRows(item, isLogin) {
   if (primary) {
     const hint = item.kind === 'note'
       ? ''
-      : `<div style="color:var(--faint);font-size:12.5px;padding:6px 12px">还没有字段，点下方「添加」补充。</div>`;
+      : `<div style="color:var(--muted);font-size:13.5px;padding:6px 12px">还没有字段，点下方「添加」补充。</div>`;
     primary.innerHTML = item.fields.map((f, i) => rowHtml(f, i)).join('') || hint;
   }
   if (extra) {
@@ -2267,7 +2335,7 @@ $('#menu-btn').addEventListener('click', async () => {
         <div class="backup-row">
           <span>${escapeHtml(b.name.replace('vault-', '').replace('.dat', ''))} · ${(b.size / 1024).toFixed(1)} KB</span>
           <button data-restore-bk="${escapeHtml(b.name)}">恢复</button>
-        </div>`).join('') : '<div style="color:var(--faint);font-size:12px;padding:8px 2px">首次保存后会自动生成</div>'}
+        </div>`).join('') : '<div style="color:var(--muted);font-size:13px;padding:8px 2px">首次保存后会自动生成</div>'}
     </div>
 
     <div class="modal-actions">
