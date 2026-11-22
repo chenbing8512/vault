@@ -85,21 +85,37 @@ const ICONS = {
   apikey: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="8" cy="8" r="3.6"/><path d="m10.6 10.6 8 8M16.4 18.6l-1.8-1.8M19 16l-1.8-1.8"/></svg>',
   note: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 3.5h9.5L19 7v13.5H6z"/><path d="M15 3.5V7h3.5M9 12h6M9 15.5h4"/></svg>',
   unlock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4.5" y="10.5" width="15" height="10" rx="2.4"/><path d="M8.2 10.5V7.4a3.8 3.8 0 0 1 7.6 0"/></svg>',
+  layers: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="m12 3.5 8 4.2-8 4.2-8-4.2 8-4.2Z"/><path d="m4 12.4 8 4.2 8-4.2"/><path d="m4 16.8 8 4.2 8-4.2"/></svg>',
+  folder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M3.5 7.2a2 2 0 0 1 2-2h3.3l2 2.2h6.7a2 2 0 0 1 2 2v7.6a2 2 0 0 1-2 2h-12a2 2 0 0 1-2-2V7.2Z"/></svg>',
+  tag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M11.2 3.6H5a1.4 1.4 0 0 0-1.4 1.4v6.2a1.6 1.6 0 0 0 .47 1.13l7.4 7.4a1.6 1.6 0 0 0 2.26 0l6.2-6.2a1.6 1.6 0 0 0 0-2.26l-7.4-7.4a1.6 1.6 0 0 0-1.13-.47Z"/><circle cx="8" cy="8" r="1.3"/></svg>',
+  clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="8.4"/><path d="M12 7.6V12l3 1.8"/></svg>',
+  shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V6l7-3Z"/><path d="m9 12 2 2 4-4" stroke-linecap="round"/></svg>',
+  archive: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="4.2" rx="1.3"/><path d="M5 8.7v9.4a1.8 1.8 0 0 0 1.8 1.8h10.4a1.8 1.8 0 0 0 1.8-1.8V8.7"/><path d="M10 12.4h4"/></svg>',
+  link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M10 13.8a4 4 0 0 0 5.7 0l2.6-2.6a4 4 0 1 0-5.7-5.7L11.2 7"/><path d="M14 10.2a4 4 0 0 0-5.7 0l-2.6 2.6a4 4 0 1 0 5.7 5.7l1.4-1.4"/></svg>',
+  copyItem: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="8.5" y="8.5" width="11" height="11" rx="2.2"/><path d="M15.5 5.8A2.3 2.3 0 0 0 13.2 3.5H6.3A2.3 2.3 0 0 0 4 5.8v7a2.3 2.3 0 0 0 2.3 2.3"/></svg>',
 };
 
 /* ---------------- 全局状态 ---------------- */
+const DEFAULT_VAULT = { id: 'v-self', name: '个人', color: '#6f8cff' };
+
 const state = {
   items: [],
+  vaults: [DEFAULT_VAULT],
+  folders: [],
+  curVaultId: DEFAULT_VAULT.id,
   selectedId: null,
   filter: 'all',
   query: '',
+  scope: { type: 'all', id: null },
   view: 'item',
+  sort: 'recent',
+  collapsed: {},
   unlocked: false,
   dirty: false,
   meta: { exists: false, path: '', backupDir: '' },
 };
 
-const prefs = { theme: 'aurora', autolock: 5, clipClear: 30 };
+const prefs = { theme: 'aurora', autolock: 5, clipClear: 30, trashDays: 30 };
 
 /* ---------------- 基础工具 ---------------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -380,7 +396,14 @@ function downloadBlob(text, filename) {
 }
 
 function serialize() {
-  return JSON.stringify({ version: 2, items: state.items, settings: {} });
+  return JSON.stringify({
+    version: 3,
+    items: state.items,
+    vaults: state.vaults,
+    folders: state.folders,
+    curVaultId: state.curVaultId,
+    settings: {},
+  });
 }
 
 /* ---------------- 持久化 ---------------- */
@@ -407,7 +430,7 @@ function defaultFields(kind) {
   return def.map((f) => ({ id: uid(), label: f.label, value: '', secret: !!f.secret }));
 }
 
-function migrate(items) {
+function migrateItems(items) {
   return (items || []).map((it) => {
     const kind = KINDS[it.kind] ? it.kind : 'login';
     const fields = Array.isArray(it.fields)
@@ -425,16 +448,117 @@ function migrate(items) {
       fields,
       notes: it.notes || '',
       favorite: !!it.favorite,
+      tags: Array.isArray(it.tags) ? it.tags.filter(Boolean).map(String) : [],
+      vaultId: it.vaultId || DEFAULT_VAULT.id,
+      folderId: it.folderId || null,
       history: Array.isArray(it.history) ? it.history : [],
       createdAt: it.createdAt || Date.now(),
       updatedAt: it.updatedAt || it.createdAt || Date.now(),
+      usedAt: it.usedAt || null,
+      archivedAt: it.archivedAt || null,
       deletedAt: it.deletedAt || null,
     };
   });
 }
 
+/* 旧版本数据（v1/v2）只有扁平 items，这里补出默认保险库与文件夹结构 */
+function loadData(data) {
+  const raw = data || {};
+  state.vaults = Array.isArray(raw.vaults) && raw.vaults.length
+    ? raw.vaults.map((v) => ({ id: v.id || uid(), name: v.name || '保险库', color: v.color || '#6f8cff' }))
+    : [{ ...DEFAULT_VAULT }];
+  const vaultIds = new Set(state.vaults.map((v) => v.id));
+
+  state.folders = (Array.isArray(raw.folders) ? raw.folders : [])
+    .filter((f) => f && f.id && f.name)
+    .map((f) => ({
+      id: f.id,
+      name: f.name,
+      parentId: f.parentId || null,
+      vaultId: vaultIds.has(f.vaultId) ? f.vaultId : state.vaults[0].id,
+    }));
+
+  state.items = migrateItems(raw.items);
+  // 校正悬空的保险库 / 文件夹引用，避免迁移后条目“消失”
+  const folderIds = new Set(state.folders.map((f) => f.id));
+  state.items.forEach((i) => {
+    if (!vaultIds.has(i.vaultId)) i.vaultId = state.vaults[0].id;
+    if (i.folderId && !folderIds.has(i.folderId)) i.folderId = null;
+  });
+  state.curVaultId = state.vaults.some((v) => v.id === raw.curVaultId) ? raw.curVaultId : state.vaults[0].id;
+}
+
 const activeItems = () => state.items.filter((i) => !i.deletedAt);
 const trashedItems = () => state.items.filter((i) => i.deletedAt);
+const archivedItems = () => state.items.filter((i) => i.archivedAt && !i.deletedAt);
+
+/* ---------------- 组织模型 ---------------- */
+function currentVault() {
+  return state.vaults.find((v) => v.id === state.curVaultId) || state.vaults[0] || DEFAULT_VAULT;
+}
+
+/* 当前保险库内、未删除且未归档的条目 */
+function vaultLive() {
+  return activeItems().filter((i) => i.vaultId === state.curVaultId && !i.archivedAt);
+}
+
+const folderById = (id) => state.folders.find((f) => f.id === id) || null;
+const childFolders = (pid) => state.folders.filter((f) => (f.parentId || null) === (pid || null) && f.vaultId === state.curVaultId);
+
+/* 某个文件夹及其所有后代 */
+function folderSubtree(id) {
+  const out = new Set([id]);
+  let guard = 0;
+  let added = true;
+  while (added && guard++ < 20) {
+    added = false;
+    state.folders.forEach((f) => {
+      if (f.parentId && out.has(f.parentId) && !out.has(f.id)) { out.add(f.id); added = true; }
+    });
+  }
+  return out;
+}
+
+function folderPath(id) {
+  const parts = [];
+  let cur = folderById(id);
+  let guard = 0;
+  while (cur && guard++ < 12) {
+    parts.unshift(cur.name);
+    cur = cur.parentId ? folderById(cur.parentId) : null;
+  }
+  return parts.join(' / ');
+}
+
+/* 条目数（含子文件夹） */
+function folderCount(id) {
+  const set = folderSubtree(id);
+  return vaultLive().filter((i) => i.folderId && set.has(i.folderId)).length;
+}
+
+/* 从网址里取站点标识，用于同一网站多账号归组 */
+function domainOf(url) {
+  let s = String(url || '').trim().toLowerCase();
+  if (!s) return '';
+  s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//, '').replace(/^www\./, '');
+  s = s.split('/')[0].split('?')[0].split('#')[0].split('@').pop();
+  s = s.replace(/:\d+$/, '');
+  return s;
+}
+
+function sameSiteItems(item) {
+  const d = domainOf(item.url);
+  if (!d) return [];
+  return activeItems().filter(
+    (i) => i.id !== item.id && !i.archivedAt && i.vaultId === item.vaultId && domainOf(i.url) === d
+  );
+}
+
+function allTags() {
+  const map = new Map();
+  vaultLive().forEach((i) => (i.tags || []).forEach((t) => map.set(t, (map.get(t) || 0) + 1)));
+  return Array.from(map.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh'));
+}
 
 /* ---------------- 门禁 ---------------- */
 let gateMode = 'unlock';
@@ -517,7 +641,7 @@ $('#gate-form').addEventListener('submit', async (e) => {
   try {
     const plain = gateMode === 'create' ? await store.create(pwd) : await store.unlock(pwd);
     const data = JSON.parse(plain || '{}');
-    state.items = migrate(data.items);
+    loadData(data);
     state.unlocked = true;
     $('#pwd').value = '';
     $('#pwd2').value = '';
@@ -535,12 +659,25 @@ function enterApp() {
   $('#gate').classList.add('hidden');
   $('#main').classList.remove('hidden');
   state.view = 'item';
+  state.scope = { type: 'all', id: null };
+  state.filter = 'all';
+  cleanTrashOnBoot();
+  renderNav();
   renderFilters();
   renderList();
-  const first = activeItems()[0];
+  const first = visibleItems()[0];
   if (first) selectItem(first.id);
   else renderDetail();
   resetAutoLock();
+}
+
+/* 回收站里超过保留期的条目自动清理 */
+function cleanTrashOnBoot() {
+  if (!prefs.trashDays) return;
+  const cutoff = Date.now() - prefs.trashDays * 86400000;
+  const before = state.items.length;
+  state.items = state.items.filter((i) => !(i.deletedAt && i.deletedAt < cutoff));
+  if (state.items.length !== before) persist();
 }
 
 async function doLock(silent) {
@@ -553,10 +690,13 @@ async function doLock(silent) {
   await store.lock();
   state.unlocked = false;
   state.items = [];
+  state.vaults = [{ ...DEFAULT_VAULT }];
+  state.folders = [];
   state.selectedId = null;
   state.query = '';
   state.filter = 'all';
   state.view = 'item';
+  state.scope = { type: 'all', id: null };
   $('#search').value = '';
   $('#list').innerHTML = '';
   $('#detail').innerHTML = '';
@@ -579,57 +719,294 @@ function resetAutoLock() {
   window.addEventListener(ev, resetAutoLock, { passive: true })
 );
 
-/* ---------------- 侧栏 ---------------- */
+/* ---------------- 弹出菜单 ---------------- */
+function showMenu(anchor, items) {
+  const pop = $('#menu-pop');
+  pop.innerHTML = items.map((it, idx) => {
+    if (it.sep) return '<div class="sep"></div>';
+    if (it.label) return `<div class="pop-label">${escapeHtml(it.label)}</div>`;
+    return `<button data-mi="${idx}" class="${it.danger ? 'danger' : ''}">
+      ${it.icon || ''}<span>${escapeHtml(it.text)}</span>${it.checked ? '<span class="chk">✓</span>' : ''}
+    </button>`;
+  }).join('');
+  pop.classList.remove('hidden');
+
+  const r = anchor.getBoundingClientRect();
+  const w = pop.offsetWidth;
+  const h = pop.offsetHeight;
+  let left = r.left;
+  let top = r.bottom + 5;
+  if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
+  if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 5);
+  pop.style.left = Math.max(8, left) + 'px';
+  pop.style.top = top + 'px';
+
+  pop.querySelectorAll('[data-mi]').forEach((b) =>
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      hideMenu();
+      const it = items[+b.dataset.mi];
+      if (it && it.onClick) it.onClick();
+    })
+  );
+}
+
+function hideMenu() { $('#menu-pop').classList.add('hidden'); }
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#menu-pop') && !e.target.closest('[data-more]') && !e.target.closest('#vault-pick')) hideMenu();
+});
+
+/* ---------------- 侧栏导航 ---------------- */
+function navItemHtml({ type, id, label, icon, count, depth = 0, more = false, hasKids = false, collapsed = false }) {
+  const on = state.scope.type === type && (id ? state.scope.id === id : true);
+  const pad = 8 + depth * 14;
+  const tw = hasKids
+    ? `<span class="tw" data-tw="${escapeHtml(id)}" title="展开/收起"></span>`
+    : (depth ? '<span class="tw-ph"></span>' : '');
+  return `<button class="nav-item ${on ? 'on' : ''} ${depth ? 'child' : ''} ${collapsed ? 'collapsed' : ''}"
+      data-scope="${type}" ${id ? `data-sid="${escapeHtml(id)}"` : ''} style="padding-left:${pad}px">
+    ${tw}${depth ? '' : (icon || '')}
+    <span class="lbl">${escapeHtml(label)}</span>
+    <span class="n ${more ? 'hide-on-hover' : ''}">${count == null ? '' : count}</span>
+    ${more ? `<span class="row-more" data-more="${escapeHtml(id)}" data-kind="${type}">⋯</span>` : ''}
+  </button>`;
+}
+
+function renderNav() {
+  const v = currentVault();
+  $('#vault-name').textContent = v.name;
+  $('#vault-dot').style.background = v.color;
+
+  const live = vaultLive();
+  $('#nav-main').innerHTML = [
+    navItemHtml({ type: 'all', label: '全部条目', icon: ICONS.layers, count: live.length }),
+    navItemHtml({ type: 'fav', label: '收藏', icon: ICONS.star, count: live.filter((i) => i.favorite).length || '' }),
+    navItemHtml({ type: 'recent', label: '最近使用', icon: ICONS.clock, count: '' }),
+  ].join('');
+
+  $('#nav-tools').innerHTML = [
+    navItemHtml({ type: 'audit', label: '密码体检', icon: ICONS.shield, count: '' }),
+    navItemHtml({ type: 'archived', label: '归档', icon: ICONS.archive, count: archivedItems().filter((i) => i.vaultId === state.curVaultId).length || '' }),
+    navItemHtml({ type: 'trash', label: '回收站', icon: ICONS.trash, count: trashedItems().length || '' }),
+  ].join('');
+
+  renderFolderTree();
+  renderTags();
+}
+
+function renderFolderTree() {
+  const box = $('#folder-tree');
+  const roots = childFolders(null);
+  if (!roots.length) {
+    box.innerHTML = `<div class="tag-empty">还没有文件夹<br>用「＋」按项目或用途分一层</div>`;
+    return;
+  }
+  const walk = (list, depth) => list.map((f) => {
+    const kids = childFolders(f.id);
+    const collapsed = !!state.collapsed[f.id];
+    return navItemHtml({
+      type: 'folder', id: f.id, label: f.name, depth,
+      count: folderCount(f.id), more: true, hasKids: kids.length > 0, collapsed,
+    }) + (kids.length && !collapsed ? walk(kids, depth + 1) : '');
+  }).join('');
+  box.innerHTML = walk(roots, 0);
+}
+
+function renderTags() {
+  const tags = allTags();
+  const box = $('#tag-list');
+  if (!tags.length) {
+    box.innerHTML = `<div class="tag-empty">给条目加标签，之后能跨文件夹筛</div>`;
+    return;
+  }
+  box.innerHTML = tags.slice(0, 14).map(([t, n]) =>
+    `<button class="tag-mini ${state.scope.type === 'tag' && state.scope.id === t ? 'on' : ''}" data-tag="${escapeHtml(t)}">${escapeHtml(t)}<span style="opacity:.55;margin-left:4px">${n}</span></button>`
+  ).join('');
+}
+
+function setScope(type, id) {
+  state.scope = { type, id: id || null };
+  state.view = (type === 'audit' || type === 'trash') ? type : 'item';
+  state.selectedId = null;
+  state.filter = 'all';
+  hideMenu();
+  renderNav();
+  renderFilters();
+  renderList();
+  const first = visibleItems()[0];
+  if (type === 'item' || type === 'all' || type === 'fav' || type === 'recent' ||
+      type === 'folder' || type === 'tag' || type === 'archived') {
+    if (first) { state.selectedId = first.id; renderList(); }
+  }
+  renderDetail();
+}
+
+/* 导航点击（事件委托） */
+document.addEventListener('click', (e) => {
+  const tw = e.target.closest('[data-tw]');
+  if (tw) {
+    e.stopPropagation();
+    e.preventDefault();
+    const id = tw.dataset.tw;
+    state.collapsed[id] = !state.collapsed[id];
+    renderFolderTree();
+    return;
+  }
+
+  const tagBtn = e.target.closest('[data-tag]');
+  if (tagBtn) { setScope('tag', tagBtn.dataset.tag); return; }
+
+  const moreBtn = e.target.closest('[data-more]');
+  if (moreBtn) {
+    e.stopPropagation();
+    openFolderMenu(moreBtn, moreBtn.dataset.more, moreBtn.dataset.kind);
+    return;
+  }
+
+  const navBtn = e.target.closest('.nav-item[data-scope]');
+  if (navBtn) {
+    const type = navBtn.dataset.scope;
+    const sid = navBtn.dataset.sid || null;
+    setScope(type, sid);
+  }
+});
+
+function openFolderMenu(anchor, id, kind) {
+  const f = folderById(id);
+  if (!f) return;
+  showMenu(anchor, [
+    { label: f.name },
+    { text: '新建子文件夹', icon: ICONS.folder, onClick: () => createFolder(f.id) },
+    { text: '重命名', onClick: () => renameFolder(f.id) },
+    { text: '移动到…', onClick: () => moveFolderDialog(f.id) },
+    { sep: true },
+    { text: '删除文件夹', danger: true, onClick: () => deleteFolder(f.id) },
+  ]);
+}
+
 function renderFilters() {
-  $('#filters').innerHTML = TYPES.map(
+  const box = $('#filters');
+  const hide = state.view === 'audit' || state.view === 'trash';
+  box.classList.toggle('hidden', hide);
+  if (hide) return;
+  box.innerHTML = TYPES.map(
     (t) => `<button class="chip ${state.filter === t.key ? 'on' : ''}" data-filter="${t.key}">${t.label}</button>`
   ).join('');
   $$('#filters .chip').forEach((c) =>
     c.addEventListener('click', () => {
       state.filter = c.dataset.filter;
-      state.view = 'item';
       renderFilters();
       renderList();
-      renderDetail();
     })
   );
 }
 
+function scopeTitle() {
+  const sc = state.scope;
+  switch (sc.type) {
+    case 'fav': return '收藏';
+    case 'recent': return '最近使用';
+    case 'folder': return folderPath(sc.id) || '文件夹';
+    case 'tag': return '#' + sc.id;
+    case 'archived': return '归档';
+    case 'audit': return '密码体检';
+    case 'trash': return '回收站';
+    default: return '全部条目';
+  }
+}
+
+function scopeBase() {
+  const sc = state.scope;
+  if (sc.type === 'folder' && sc.id) {
+    const set = folderSubtree(sc.id);
+    return vaultLive().filter((i) => i.folderId && set.has(i.folderId));
+  }
+  if (sc.type === 'tag' && sc.id) return vaultLive().filter((i) => (i.tags || []).includes(sc.id));
+  if (sc.type === 'recent') {
+    return vaultLive().filter((i) => i.usedAt).sort((a, b) => b.usedAt - a.usedAt).slice(0, 20);
+  }
+  if (sc.type === 'archived') {
+    return state.items.filter((i) => i.archivedAt && !i.deletedAt && i.vaultId === state.curVaultId);
+  }
+  return vaultLive();
+}
+
+function sortItems(list) {
+  const arr = list.slice();
+  if (state.scope.type === 'recent') return arr;
+  if (state.sort === 'name') return arr.sort((a, b) => (a.title || '未命名').localeCompare(b.title || '未命名', 'zh'));
+  if (state.sort === 'created') return arr.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  return arr.sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0) || (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+
 function visibleItems() {
   const q = state.query.trim().toLowerCase();
-  let list = activeItems();
+  let list = scopeBase();
   if (state.filter === 'fav') list = list.filter((i) => i.favorite);
   else if (state.filter !== 'all') list = list.filter((i) => (i.category || 'other') === state.filter);
   if (q) {
     list = list.filter((i) =>
-      [i.title, i.username, i.url, i.notes, (i.fields || []).map((f) => f.label + ' ' + f.value).join(' ')]
+      [i.title, i.username, i.url, i.notes, (i.tags || []).join(' '), (i.fields || []).map((f) => f.label + ' ' + f.value).join(' ')]
         .join(' ').toLowerCase().includes(q)
     );
   }
-  return list.sort(
-    (a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0) || (b.updatedAt || 0) - (a.updatedAt || 0)
-  );
+  return sortItems(list);
+}
+
+function siteCounts() {
+  const map = new Map();
+  vaultLive().forEach((i) => {
+    const d = domainOf(i.url);
+    if (d) map.set(d, (map.get(d) || 0) + 1);
+  });
+  return map;
 }
 
 function renderList() {
   const list = visibleItems();
   const box = $('#list');
-  $('#count').textContent = `${activeItems().length} 条`;
-  $('#audit-btn').classList.toggle('active-view', state.view === 'audit');
-  $('#trash-btn').classList.toggle('active-view', state.view === 'trash');
-  if (!list.length) {
-    box.innerHTML = `<div class="empty-list">${activeItems().length ? '没有匹配的条目' : '还没有任何记录<br>点右下角「新建」开始'}</div>`;
+  const isTrash = state.view === 'trash';
+  $('#count').textContent = isTrash ? `${trashedItems().length} 条` : `${list.length} 条${state.query ? '匹配' : ''}`;
+  $('#scope-title').textContent = scopeTitle();
+
+  if (isTrash) {
+    box.innerHTML = `<div class="empty-list">回收站是独立视图<br><span style="opacity:.7">已删除的条目和恢复操作都在右侧</span></div>`;
     return;
   }
+
+  if (!list.length) {
+    const empty = state.query ? '没有匹配的条目' :
+      state.scope.type === 'archived' ? '归档是空的<br><span style="opacity:.7">归档只隐藏条目，不会删除</span>' :
+      state.scope.type === 'folder' ? '这个文件夹还是空的<br><span style="opacity:.7">在条目详情里选「移动到」就能放进来</span>' :
+      state.scope.type === 'tag' ? '这个标签下还没有条目' :
+      '还没有任何记录<br>点左下角「新建条目」开始';
+    box.innerHTML = `<div class="empty-list">${empty}</div>`;
+    return;
+  }
+
+  const dom = siteCounts();
+  const showGroup = state.sort === 'name';
+  let lastChar = '';
+
   box.innerHTML = list.map((i) => {
     const av = avatarOf(i.title || '?');
-    const sub = i.kind === 'login' ? (i.username || i.url || '—') : (KINDS[i.kind] ? KINDS[i.kind].label : '');
-    return `<div class="item ${i.id === state.selectedId && state.view === 'item' ? 'active' : ''}" data-id="${i.id}">
+    let sub = i.kind === 'login' ? (i.username || i.url || '—') : (KINDS[i.kind] ? KINDS[i.kind].label : '');
+    if (state.scope.type === 'recent' && i.usedAt) sub = `${sub} · ${fmtAgo(i.usedAt)}用过`;
+    const d = domainOf(i.url);
+    const nSame = d ? dom.get(d) || 0 : 0;
+    let sep = '';
+    if (showGroup) {
+      const ch = firstChar(i.title || '未命名');
+      if (ch !== lastChar) { lastChar = ch; sep = `<div class="list-sep">${escapeHtml(ch)}</div>`; }
+    }
+    return sep + `<div class="item ${i.id === state.selectedId && state.view === 'item' ? 'active' : ''}" data-id="${i.id}">
       <div class="avatar" style="background:${av.bg}">${escapeHtml(av.ch)}</div>
       <div class="item-body">
         <div class="item-title">${escapeHtml(i.title || '未命名')}</div>
         <div class="item-sub">${escapeHtml(sub)}</div>
       </div>
+      ${nSame > 1 ? `<span class="badge-multi" title="这个网站共 ${nSame} 个账号">${nSame}</span>` : ''}
+      ${i.archivedAt ? '<span class="badge-arch">归档</span>' : ''}
       ${i.otp ? '<span class="badge-otp">2FA</span>' : ''}
       ${i.favorite ? '<span class="star">★</span>' : ''}
     </div>`;
@@ -637,11 +1014,200 @@ function renderList() {
   $$('#list .item').forEach((el) => el.addEventListener('click', () => selectItem(el.dataset.id)));
 }
 
+function firstChar(t) {
+  const c = String(t).trim()[0] || '#';
+  return /[a-zA-Z]/.test(c) ? c.toUpperCase() : /[0-9]/.test(c) ? '0-9' : '其 他';
+}
+
 function selectItem(id) {
+  const it = state.items.find((x) => x.id === id);
+  if (it) { it.usedAt = Date.now(); persist(); }
   state.view = 'item';
   state.selectedId = id;
   renderList();
   renderDetail();
+}
+
+/* ---------------- 文件夹操作 ---------------- */
+function createFolder(parentId) {
+  promptDialog({
+    title: parentId ? '新建子文件夹' : '新建文件夹',
+    desc: parentId ? `会建在「${folderPath(parentId)}」下面` : '按项目、用途或客户分一层，条目可以移动到文件夹里',
+    fields: [{ key: 'name', placeholder: '文件夹名称' }],
+    okText: '创建',
+  }).then((r) => {
+    if (!r || !r.name.trim()) return;
+    const f = { id: uid(), name: r.name.trim(), parentId: parentId || null, vaultId: state.curVaultId };
+    state.folders.push(f);
+    persist();
+    state.collapsed[parentId] = false;
+    renderNav();
+    setScope('folder', f.id);
+    toast('文件夹已创建', 'ok');
+  });
+}
+
+function renameFolder(id) {
+  const f = folderById(id);
+  if (!f) return;
+  promptDialog({ title: '重命名文件夹', fields: [{ key: 'name', value: f.name }], okText: '保存' }).then((r) => {
+    if (!r || !r.name.trim()) return;
+    f.name = r.name.trim();
+    persist();
+    renderNav();
+    renderList();
+  });
+}
+
+function moveFolderDialog(id) {
+  const f = folderById(id);
+  if (!f) return;
+  const bad = folderSubtree(id);
+  const options = state.folders.filter((x) => x.vaultId === f.vaultId && !bad.has(x.id));
+  const card = $('#modal-card');
+  card.classList.remove('wide');
+  card.innerHTML = `
+    <h3>移动文件夹</h3>
+    <p class="modal-sub">把「${escapeHtml(f.name)}」移到别的位置</p>
+    <div class="folder-pick">
+      <button class="folder-opt ${!f.parentId ? 'on' : ''}" data-parent="">（顶层）</button>
+      ${options.map((o) => `<button class="folder-opt ${f.parentId === o.id ? 'on' : ''}" data-parent="${o.id}">${escapeHtml(folderPath(o.id))}</button>`).join('')}
+    </div>
+    <div class="modal-actions"><button class="ghost-btn" id="fp-cancel">取消</button></div>`;
+  $('#modal').classList.remove('hidden');
+  $('#fp-cancel').addEventListener('click', closeModal);
+  $$('.folder-opt', card).forEach((b) =>
+    b.addEventListener('click', () => {
+      f.parentId = b.dataset.parent || null;
+      persist();
+      closeModal();
+      renderNav();
+      renderList();
+      toast('已移动', 'ok');
+    })
+  );
+}
+
+async function deleteFolder(id) {
+  const f = folderById(id);
+  if (!f) return;
+  const set = folderSubtree(id);
+  const subs = Array.from(set).filter((x) => x !== id);
+  const affected = vaultLive().filter((i) => i.folderId && set.has(i.folderId));
+  const ok = await confirmDialog({
+    title: '删除文件夹？',
+    desc: `「${escapeHtml(f.name)}」${subs.length ? `及其 ${subs.length} 个子文件夹` : ''}会被删除${affected.length ? `，里面的 ${affected.length} 个条目会退回「未分类」（不会被删除）` : ''}。`,
+    okText: '删除',
+    danger: true,
+  });
+  if (!ok) return;
+  state.items.forEach((i) => { if (i.folderId && set.has(i.folderId)) i.folderId = null; });
+  state.folders = state.folders.filter((x) => !set.has(x.id));
+  if (state.scope.type === 'folder' && set.has(state.scope.id)) state.scope = { type: 'all', id: null };
+  persist();
+  renderNav();
+  renderList();
+  renderDetail();
+  toast('文件夹已删除，条目已保留');
+}
+
+/* ---------------- 保险库操作 ---------------- */
+$('#vault-pick').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const items = state.vaults.map((v, idx) => ({
+    text: `${v.name}（${activeItems().filter((i) => i.vaultId === v.id && !i.archivedAt).length}）`,
+    checked: v.id === state.curVaultId,
+    icon: `<span class="vdot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${v.color}"></span>`,
+    onClick: () => switchVault(v.id),
+  }));
+  items.push({ sep: true });
+  items.push({ text: '新建保险库…', icon: ICONS.plus, onClick: () => createVault() });
+  if (state.vaults.length > 1) {
+    items.push({ text: '管理当前保险库…', onClick: () => manageVault(currentVault().id) });
+  }
+  showMenu($('#vault-pick'), items);
+});
+
+function switchVault(id) {
+  state.curVaultId = id;
+  state.scope = { type: 'all', id: null };
+  state.view = 'item';
+  state.selectedId = null;
+  state.filter = 'all';
+  persist();
+  renderNav();
+  renderFilters();
+  renderList();
+  renderDetail();
+}
+
+function createVault() {
+  promptDialog({
+    title: '新建保险库',
+    desc: '保险库之间彼此独立，适合把「个人」「工作」「客户」分开，避免在列表里混在一起。',
+    fields: [{ key: 'name', placeholder: '例如 工作' }],
+    okText: '创建',
+  }).then((r) => {
+    if (!r || !r.name.trim()) return;
+    const palette = ['#6f8cff', '#35d39b', '#fb923c', '#f472b6', '#a78bfa', '#38bdf8'];
+    const v = { id: uid(), name: r.name.trim(), color: palette[state.vaults.length % palette.length] };
+    state.vaults.push(v);
+    persist();
+    switchVault(v.id);
+    toast('保险库已创建', 'ok');
+  });
+}
+
+function manageVault(id) {
+  const v = state.vaults.find((x) => x.id === id);
+  if (!v) return;
+  showMenu($('#vault-pick'), [
+    { label: v.name },
+    { text: '重命名', onClick: () => renameVault(id) },
+    { text: '换个颜色', onClick: () => cycleVaultColor(id) },
+    { sep: true },
+    { text: '删除这个保险库', danger: true, onClick: () => deleteVault(id) },
+  ]);
+}
+
+function renameVault(id) {
+  const v = state.vaults.find((x) => x.id === id);
+  if (!v) return;
+  promptDialog({ title: '重命名保险库', fields: [{ key: 'name', value: v.name }], okText: '保存' }).then((r) => {
+    if (!r || !r.name.trim()) return;
+    v.name = r.name.trim();
+    persist();
+    renderNav();
+  });
+}
+
+function cycleVaultColor(id) {
+  const v = state.vaults.find((x) => x.id === id);
+  if (!v) return;
+  const palette = ['#6f8cff', '#35d39b', '#fb923c', '#f472b6', '#a78bfa', '#38bdf8', '#eab308', '#f87171'];
+  const i = palette.indexOf(v.color);
+  v.color = palette[(i + 1) % palette.length];
+  persist();
+  renderNav();
+}
+
+async function deleteVault(id) {
+  if (state.vaults.length <= 1) return toast('至少要保留一个保险库', 'err');
+  const v = state.vaults.find((x) => x.id === id);
+  const count = state.items.filter((i) => i.vaultId === id && !i.deletedAt).length;
+  const ok = await confirmDialog({
+    title: `删除「${escapeHtml(v.name)}」？`,
+    desc: count ? `里面还有 ${count} 个条目，删除后这些条目会一起进回收站，可以恢复。` : '这个保险库是空的。',
+    okText: '删除',
+    danger: true,
+  });
+  if (!ok) return;
+  state.items.forEach((i) => { if (i.vaultId === id) i.deletedAt = Date.now(); });
+  state.folders = state.folders.filter((f) => f.vaultId !== id);
+  state.vaults = state.vaults.filter((x) => x.id !== id);
+  persist();
+  switchVault(state.vaults[0].id);
+  toast('保险库已删除，条目在回收站');
 }
 
 /* ---------------- TOTP ---------------- */
@@ -734,6 +1300,10 @@ function renderDetail() {
   if (item.otp) metaBits.push('<span>已启用两步验证</span>');
 
   const isLogin = item.kind === 'login';
+  const vault = state.vaults.find((v) => v.id === item.vaultId) || currentVault();
+  const same = sameSiteItems(item);
+  const tags = item.tags || [];
+  if (item.archivedAt) metaBits.push('<span>已归档</span>');
 
   $('#detail').innerHTML = `
     <div class="detail-inner">
@@ -745,6 +1315,8 @@ function renderDetail() {
         </div>
         <div class="head-tools">
           <button class="ghost-btn icon-only" id="f-fav" title="收藏">${item.favorite ? ICONS.starOn : ICONS.star}</button>
+          <button class="ghost-btn icon-only" id="f-dup" title="复制成新条目（适合同站点第二个账号）">${ICONS.copyItem}</button>
+          <button class="ghost-btn icon-only ${item.archivedAt ? 'active-tool' : ''}" id="f-arch" title="${item.archivedAt ? '取消归档' : '归档（从列表收起）'}">${ICONS.archive}</button>
           <button class="ghost-btn danger icon-only" id="f-del" title="移到回收站">${ICONS.trash}</button>
         </div>
       </div>
@@ -770,10 +1342,13 @@ function renderDetail() {
             <span class="row-label"></span>
             <div id="pwd-meter">${pwdMeterHtml(item.password)}</div>
           </div>
-          <div class="row">
+          <div class="row static">
             <span class="row-label">网址</span>
             <input class="row-input" id="f-url" value="${escapeHtml(item.url)}" placeholder="https://" spellcheck="false" />
-            <div class="row-actions"><button class="mini-btn" id="cp-url" title="复制">${ICONS.copy}</button></div>
+            <div class="row-actions always">
+              <button class="mini-btn" id="open-url" title="在浏览器打开">${ICONS.link}</button>
+              <button class="mini-btn" id="cp-url" title="复制">${ICONS.copy}</button>
+            </div>
           </div>
         </div>
       ` : `
@@ -781,12 +1356,39 @@ function renderDetail() {
         <div class="rows" id="fields-rows"></div>
       `}
 
+      <div class="section-label">位置</div>
+      <div class="loc-grid">
+        <button class="loc-chip" id="pick-vault" title="切换到别的保险库">
+          <span class="vdot" style="background:${vault.color}"></span>${escapeHtml(vault.name)}
+        </button>
+        <button class="loc-chip" id="pick-folder" title="移动到文件夹">
+          ${ICONS.folder}${item.folderId ? escapeHtml(folderPath(item.folderId)) : '未分类'}
+        </button>
+      </div>
+
+      <div class="section-label">标签</div>
+      <div class="tag-editor" id="tag-editor">
+        ${tags.map((t) => `<span class="tag-pill">${escapeHtml(t)}<button data-rmtag="${escapeHtml(t)}" title="移除">${ICONS.x}</button></span>`).join('')}
+        <input class="tag-input" id="tag-input" placeholder="${tags.length ? '再加一个…' : '输入标签后回车'}" spellcheck="false" />
+      </div>
+
       <div class="section-label">分类</div>
-      <div class="type-picker" style="padding-left:12px">
+      <div class="type-picker" style="padding-left:2px">
         ${TYPES.filter((t) => t.key !== 'all' && t.key !== 'fav')
           .map((t) => `<button class="tp ${(item.category || 'other') === t.key ? 'on' : ''}" data-cat="${t.key}">${t.label}</button>`)
           .join('')}
       </div>
+
+      ${isLogin ? `
+        <div class="section-label">同一网站的其它账号 <button id="add-same">+ 添加一个</button></div>
+        <div class="related">
+          ${same.length ? same.map((x) => `<div class="related-item" data-rel="${x.id}">
+            <span class="ri-av" style="background:${avatarOf(x.title || '?').bg}">${escapeHtml(avatarOf(x.title || '?').ch)}</span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(x.title || '未命名')}</span>
+            <span class="ri-u">${escapeHtml(x.username || '无账号')}</span>
+          </div>`).join('') : '<div class="related-empty">还没有。同一网站要多开账号时点右上角复制图标，或点这里新建。</div>'}
+        </div>
+      ` : ''}
 
       <div class="section-label">两步验证 <button id="otp-edit">${item.otp ? '更换密钥' : '绑定验证器'}</button></div>
       <div id="otp-area" data-secret="${escapeHtml(item.otp)}"></div>
@@ -852,6 +1454,17 @@ function bindDetail(item, isLogin) {
     $('#cp-user').addEventListener('click', () => copyText(item.username, '用户名已复制'));
     $('#cp-pwd').addEventListener('click', () => copySecret(item.password));
     $('#cp-url').addEventListener('click', () => copyText(item.url, '网址已复制'));
+    $('#open-url').addEventListener('click', async () => {
+      const raw = (item.url || '').trim();
+      if (!raw) return toast('这条还没有填网址', 'err');
+      const full = /^https?:\/\//i.test(raw) ? raw : 'https://' + raw;
+      try {
+        if (IS_DESKTOP) await invoke('open_url', { url: full });
+        else window.open(full, '_blank', 'noopener');
+      } catch (e) {
+        toast(String(e && e.message ? e.message : e), 'err');
+      }
+    });
     $('#f-gen').addEventListener('click', () => {
       openGenerator((pwd) => {
         pushHistory(item);
@@ -868,6 +1481,90 @@ function bindDetail(item, isLogin) {
   }
 
   bind('#f-notes', 'notes');
+
+  /* 位置：保险库 */
+  $('#pick-vault').addEventListener('click', (e) => {
+    e.stopPropagation();
+    showMenu($('#pick-vault'), [
+      { label: '所在保险库' },
+      ...state.vaults.map((v) => ({
+        text: v.name,
+        checked: v.id === item.vaultId,
+        icon: `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${v.color}"></span>`,
+        onClick: () => {
+          if (v.id === item.vaultId) return;
+          const target = v;
+          item.vaultId = target.id;
+          item.folderId = null;
+          touch();
+          persist();
+          toast('已移到「' + target.name + '」', 'ok');
+          renderNav();
+          renderList();
+          renderDetail();
+        },
+      })),
+    ]);
+  });
+
+  /* 位置：文件夹 */
+  $('#pick-folder').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const list = state.folders.filter((f) => f.vaultId === item.vaultId);
+    const entries = [{ text: '未分类', checked: !item.folderId, onClick: () => setItemFolder(item, null) }];
+    if (list.length) entries.push({ sep: true });
+    list.forEach((f) => entries.push({
+      text: folderPath(f.id),
+      checked: item.folderId === f.id,
+      onClick: () => setItemFolder(item, f.id),
+    }));
+    entries.push({ sep: true });
+    entries.push({ text: '新建文件夹…', icon: ICONS.plus, onClick: () => createFolder(item.folderId) });
+    showMenu($('#pick-folder'), entries);
+  });
+
+  /* 标签：回车添加，点 × 删除 */
+  const tagInput = $('#tag-input');
+  if (tagInput) {
+    tagInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const v = tagInput.value.trim().replace(/^#/, '').slice(0, 20);
+        if (!v) return;
+        item.tags = item.tags || [];
+        if (!item.tags.includes(v)) item.tags.push(v);
+        touch();
+        persist();
+        renderNav();
+        renderDetail();
+        const t = $('#tag-input');
+        if (t) t.focus();
+      } else if (e.key === 'Backspace' && !tagInput.value && (item.tags || []).length) {
+        item.tags.pop();
+        touch();
+        persist();
+        renderNav();
+        renderDetail();
+      }
+    });
+  }
+  $$('[data-rmtag]').forEach((b) =>
+    b.addEventListener('click', () => {
+      item.tags = (item.tags || []).filter((t) => t !== b.dataset.rmtag);
+      touch();
+      persist();
+      renderNav();
+      renderDetail();
+    })
+  );
+
+  /* 同站点账号 / 复制 / 归档 */
+  const addSame = $('#add-same');
+  if (addSame) addSame.addEventListener('click', () => duplicateItem(item, true));
+  $$('[data-rel]').forEach((el) => el.addEventListener('click', () => selectItem(el.dataset.rel)));
+
+  $('#f-dup').addEventListener('click', () => duplicateItem(item));
+  $('#f-arch').addEventListener('click', () => toggleArchive(item));
 
   $$('.type-picker .tp').forEach((b) =>
     b.addEventListener('click', () => {
@@ -955,6 +1652,71 @@ function bindDetail(item, isLogin) {
     persist();
     renderDetail();
   });
+}
+
+function setItemFolder(item, folderId) {
+  item.folderId = folderId || null;
+  item.updatedAt = Date.now();
+  persist();
+  renderNav();
+  renderList();
+  renderDetail();
+  toast(folderId ? '已移到「' + folderPath(folderId) + '」' : '已移出文件夹', 'ok');
+}
+
+/* 复制条目：asNewAccount=true 时生成同站点的空白新账号 */
+function duplicateItem(item, asNewAccount) {
+  const copy = JSON.parse(JSON.stringify(item));
+  copy.id = uid();
+  copy.createdAt = Date.now();
+  copy.updatedAt = Date.now();
+  copy.usedAt = null;
+  copy.deletedAt = null;
+  copy.archivedAt = null;
+  copy.favorite = false;
+  copy.history = [];
+
+  const base = (item.title || '未命名').replace(/\s*\(\d+\)$/, '').replace(/\s*副本$/, '');
+  if (asNewAccount) {
+    const used = new Set([item.title].concat(sameSiteItems(item).map((s) => s.title)));
+    let n = 2;
+    while (used.has(base + ' (' + n + ')')) n++;
+    copy.title = base + ' (' + n + ')';
+    copy.username = '';
+    copy.password = '';
+    copy.otp = '';
+    copy.notes = '';
+    copy.fields = (copy.fields || []).map((f) => ({ ...f, value: '' }));
+  } else {
+    copy.title = base + ' 副本';
+  }
+
+  state.items.unshift(copy);
+  persist();
+  if (state.scope.type === 'archived') state.scope = { type: 'all', id: null };
+  renderNav();
+  selectItem(copy.id);
+  setTimeout(() => {
+    const t = asNewAccount ? $('#f-user') : $('#f-title');
+    if (t) { t.focus(); if (asNewAccount) t.select(); }
+  }, 60);
+  toast(asNewAccount ? '已为同一网站新建账号，填上用户名即可' : '已复制条目', 'ok');
+}
+
+function toggleArchive(item) {
+  item.archivedAt = item.archivedAt ? null : Date.now();
+  item.updatedAt = Date.now();
+  persist();
+  if (item.archivedAt) {
+    toast('已归档，不再占用列表');
+    const next = visibleItems()[0];
+    state.selectedId = next ? next.id : null;
+  } else {
+    toast('已取消归档', 'ok');
+  }
+  renderNav();
+  renderList();
+  renderDetail();
 }
 
 function pushHistory(item) {
@@ -1083,6 +1845,7 @@ function addItem() {
 }
 
 function createItem(kind) {
+  const sc = state.scope;
   const item = {
     id: uid(),
     kind,
@@ -1095,16 +1858,26 @@ function createItem(kind) {
     fields: defaultFields(kind),
     notes: '',
     favorite: false,
+    tags: sc.type === 'tag' && sc.id ? [sc.id] : [],
+    vaultId: state.curVaultId,
+    folderId: sc.type === 'folder' ? sc.id : null,
     history: [],
     createdAt: Date.now(),
     updatedAt: Date.now(),
+    usedAt: null,
+    archivedAt: null,
     deletedAt: null,
   };
   state.items.unshift(item);
+  if (state.scope.type === 'archived' || state.scope.type === 'recent') {
+    state.scope = { type: 'all', id: null };
+  }
   state.filter = 'all';
   state.query = '';
   $('#search').value = '';
+  renderNav();
   renderFilters();
+  renderList();
   selectItem(item.id);
   persist();
   setTimeout(() => { const t = $('#f-title'); if (t) t.focus(); }, 50);
@@ -1119,8 +1892,34 @@ $('#search').addEventListener('input', (e) => {
 });
 
 /* ---------------- 密码体检 ---------------- */
+const COMMON_PW = [
+  '123456', '12345678', '123456789', 'password', 'qwerty', 'abc123', '111111',
+  '123123', 'admin', '888888', '000000', 'iloveyou', 'wang123', 'a123456',
+  'qwerty123', '1qaz2wsx', 'zxcvbnm', '5201314', 'woaini', 'letmein',
+];
+
+/* 离线判断一个密码为什么弱，返回原因标签 */
+function weakReasons(item) {
+  const p = item.password || '';
+  const out = [];
+  const lower = p.toLowerCase();
+  if (p.length < 8) out.push('太短');
+  if (/^\d+$/.test(p)) out.push('纯数字');
+  if (COMMON_PW.includes(lower)) out.push('常见密码');
+  if (/^[a-z]+$/i.test(p) && p.length < 10) out.push('纯字母');
+  if (/(012|123|234|345|456|567|678|789|890){2,}/.test(p)) out.push('连续数字');
+  if (/(.)\1{2,}/.test(p)) out.push('重复字符');
+  const host = domainOf(item.url).split('.')[0];
+  if (host && host.length > 2 && lower.includes(host)) out.push('含站点名');
+  const user = String(item.username || '').toLowerCase().split('@')[0];
+  if (user && user.length > 2 && lower.includes(user)) out.push('含用户名');
+  if (!out.length && pwdStrength(p) <= 1) out.push('强度偏低');
+  return out;
+}
+
 function computeAudit() {
-  const logins = activeItems().filter((i) => i.kind === 'login');
+  const scopeItems = vaultLive();
+  const logins = scopeItems.filter((i) => i.kind === 'login');
   const weak = [], reused = [], old = [], empty = [];
 
   const pwdMap = new Map();
@@ -1130,12 +1929,12 @@ function computeAudit() {
       empty.push(i);
       return;
     }
-    if (pwdStrength(p) <= 1 || p.length < 8) weak.push(i);
+    if (weakReasons(i).length) weak.push(i);
     if (!pwdMap.has(p)) pwdMap.set(p, []);
     pwdMap.get(p).push(i);
   });
   pwdMap.forEach((arr) => { if (arr.length > 1) reused.push(...arr); });
-  activeItems().forEach((i) => {
+  logins.forEach((i) => {
     if (Date.now() - (i.updatedAt || 0) > OLD_DAYS * 86400000) old.push(i);
   });
 
@@ -1149,7 +1948,7 @@ function computeAudit() {
   score -= e.length * 11;
   score = Math.max(0, Math.min(100, Math.round(score)));
 
-  return { score, weak: w, reused: r, old: o, empty: e, total: activeItems().length };
+  return { score, weak: w, reused: r, old: o, empty: e, total: scopeItems.length };
 }
 
 function renderAudit() {
@@ -1175,7 +1974,7 @@ function renderAudit() {
       <div class="view-head">
         <div>
           <h2>密码体检</h2>
-          <p>全部在本机计算，密码不会离开这台电脑。</p>
+          <p>只统计当前保险库「${escapeHtml(currentVault().name)}」，全部在本机计算。</p>
         </div>
         <button class="ghost-btn" id="audit-refresh">${ICONS.refresh}重新检测</button>
       </div>
@@ -1189,7 +1988,7 @@ function renderAudit() {
       </div>
 
       <div class="audit-list">
-        ${group('弱密码', 'var(--danger)', a.weak, (i) => `强度 ${STRENGTH_LABELS[pwdStrength(i.password)] || '低'}`, '没有弱密码 ✓')}
+        ${group('弱密码', 'var(--danger)', a.weak, (i) => escapeHtml(weakReasons(i).join('、') || '强度低'), '没有弱密码 ✓')}
         ${group('重复使用', 'var(--warn)', a.reused, () => '多个账号同一密码', '没有重复密码 ✓')}
         ${group('超过半年未更新', 'var(--faint)', a.old, (i) => fmtAgo(i.updatedAt), '都很新 ✓')}
         ${group('缺少密码', 'var(--danger)', a.empty, () => '密码为空', '没有缺项 ✓')}
@@ -1210,7 +2009,7 @@ function renderTrash() {
       <div class="view-head">
         <div>
           <h2>回收站</h2>
-          <p>删除的条目会先放这里，可以恢复。</p>
+          <p>删除的条目会先放这里${prefs.trashDays ? `，超过 ${prefs.trashDays} 天自动清掉` : ''}。所有保险库共用。</p>
         </div>
         ${list.length ? `<button class="ghost-btn danger" id="trash-clear">${ICONS.trash}清空</button>` : ''}
       </div>
@@ -1219,6 +2018,7 @@ function renderTrash() {
         ${list.map((i) => `
           <div class="audit-item" style="cursor:default">
             <span style="color:var(--text)">${escapeHtml(i.title || '未命名')}</span>
+            <span class="badge-arch">${escapeHtml((state.vaults.find((v) => v.id === i.vaultId) || {}).name || '已删库')}</span>
             <span class="why">${fmtAgo(i.deletedAt)}</span>
             <button class="ghost-btn sm" data-restore="${i.id}">恢复</button>
             <button class="ghost-btn sm danger" data-purge="${i.id}">彻底删除</button>
@@ -1231,7 +2031,9 @@ function renderTrash() {
       const it = state.items.find((i) => i.id === b.dataset.restore);
       if (!it) return;
       it.deletedAt = null;
+      if (!state.vaults.some((v) => v.id === it.vaultId)) it.vaultId = state.curVaultId;
       persist(true);
+      renderNav();
       renderList();
       renderTrash();
       toast('已恢复', 'ok');
@@ -1243,6 +2045,7 @@ function renderTrash() {
       if (!ok) return;
       state.items = state.items.filter((i) => i.id !== b.dataset.purge);
       persist(true);
+      renderNav();
       renderList();
       renderTrash();
       toast('已永久删除');
@@ -1254,21 +2057,28 @@ function renderTrash() {
     if (!ok) return;
     state.items = state.items.filter((i) => !i.deletedAt);
     persist(true);
+    renderNav();
     renderList();
     renderTrash();
     toast('回收站已清空');
   });
 }
 
-$('#audit-btn').addEventListener('click', () => {
-  state.view = state.view === 'audit' ? 'item' : 'audit';
-  renderList();
-  renderDetail();
-});
-$('#trash-btn').addEventListener('click', () => {
-  state.view = state.view === 'trash' ? 'item' : 'trash';
-  renderList();
-  renderDetail();
+$('#sort-btn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const opts = [
+    { key: 'recent', text: '最近修改' },
+    { key: 'name', text: '名称 A-Z' },
+    { key: 'created', text: '添加时间' },
+  ];
+  showMenu($('#sort-btn'), [
+    { label: '排序方式' },
+    ...opts.map((o) => ({
+      text: o.text,
+      checked: state.sort === o.key,
+      onClick: () => { state.sort = o.key; renderList(); },
+    })),
+  ]);
 });
 
 /* ---------------- 生成器 ---------------- */
@@ -1416,6 +2226,16 @@ $('#menu-btn').addEventListener('click', async () => {
       ${seg('clipClear', [[15, '15 秒'], [30, '30 秒'], [60, '60 秒'], [0, '关闭']])}
     </div>
 
+    <div class="section-label">组织</div>
+    <div class="setting-row">
+      <div><div class="label">保险库</div><div class="desc">当前 ${state.vaults.length} 个保险库 · ${state.folders.length} 个文件夹</div></div>
+      <button class="ghost-btn sm" id="set-vaults">管理</button>
+    </div>
+    <div class="setting-row">
+      <div><div class="label">回收站保留</div><div class="desc">超过期限的已删除条目下次启动时自动清除</div></div>
+      ${seg('trashDays', [[7, '7 天'], [30, '30 天'], [90, '90 天'], [0, '永不']])}
+    </div>
+
     <div class="section-label">数据</div>
     <div class="setting-row">
       <div><div class="label">修改主密码</div><div class="desc">会用新密码重新加密整个库</div></div>
@@ -1468,6 +2288,7 @@ $('#menu-btn').addEventListener('click', async () => {
   );
 
   $('#set-pwd').addEventListener('click', openChangePassword);
+  $('#set-vaults').addEventListener('click', openVaultManager);
   $('#set-export').addEventListener('click', async () => {
     try {
       const p = await store.exportBackup();
@@ -1513,6 +2334,49 @@ $('#menu-btn').addEventListener('click', async () => {
     })
   );
 });
+
+function openVaultManager() {
+  const card = $('#modal-card');
+  card.classList.add('wide');
+  card.innerHTML = `
+    <h3>保险库</h3>
+    <p class="modal-sub">每个保险库有独立的条目和文件夹。按「个人 / 工作 / 客户」分开，列表就不会混在一起。</p>
+    <div class="backup-list" style="max-height:none">
+      ${state.vaults.map((v) => {
+        const n = state.items.filter((i) => i.vaultId === v.id && !i.deletedAt).length;
+        return `<div class="backup-row">
+          <span style="display:flex;align-items:center;gap:8px;color:var(--text)">
+            <i style="width:8px;height:8px;border-radius:50%;background:${v.color};display:inline-block"></i>
+            ${escapeHtml(v.name)}<span style="color:var(--faint)">${n} 条</span>
+          </span>
+          <span style="display:flex;gap:9px;align-items:center">
+            <button data-vren="${v.id}">重命名</button>
+            <button data-vcolor="${v.id}">换色</button>
+            ${state.vaults.length > 1 ? `<button data-vdel="${v.id}" style="color:var(--danger)">删除</button>` : ''}
+          </span>
+        </div>`;
+      }).join('')}
+    </div>
+    <div class="setting-row" style="margin-top:6px">
+      <div><div class="label">当前库的文件夹</div><div class="desc">${state.folders.filter((f) => f.vaultId === state.curVaultId).length} 个，可在左侧导航里直接管理</div></div>
+      <button class="ghost-btn sm" id="vm-newfolder">新建文件夹</button>
+    </div>
+    <div class="modal-actions">
+      <button class="ghost-btn" id="vm-new">+ 新建保险库</button>
+      <button class="ghost-btn" id="vm-close">关闭</button>
+    </div>`;
+  $('#modal').classList.remove('hidden');
+
+  $('#vm-close').addEventListener('click', closeModal);
+  $('#vm-new').addEventListener('click', () => { closeModal(); createVault(); });
+  $('#vm-newfolder').addEventListener('click', () => { closeModal(); createFolder(null); });
+  $$('[data-vren]', card).forEach((b) => b.addEventListener('click', () => { closeModal(); renameVault(b.dataset.vren); }));
+  $$('[data-vcolor]', card).forEach((b) => b.addEventListener('click', () => { cycleVaultColor(b.dataset.vcolor); openVaultManager(); }));
+  $$('[data-vdel]', card).forEach((b) => b.addEventListener('click', async () => {
+    closeModal();
+    await deleteVault(b.dataset.vdel);
+  }));
+}
 
 function openChangePassword() {
   const card = $('#modal-card');
@@ -1591,15 +2455,17 @@ $('#file-input').addEventListener('change', async (e) => {
         url: (iUrl >= 0 ? r[iUrl] : '') || '',
         otp: '', category: 'web', fields: [],
         notes: (iNote >= 0 ? r[iNote] : '') || '',
-        favorite: false, history: [],
-        createdAt: Date.now(), updatedAt: Date.now(), deletedAt: null,
+        favorite: false, tags: [], vaultId: state.curVaultId, folderId: null,
+        history: [], createdAt: Date.now(), updatedAt: Date.now(),
+        usedAt: null, archivedAt: null, deletedAt: null,
       });
       count++;
     });
     persist(true);
+    renderNav();
     renderList();
     renderDetail();
-    toast(`已导入 ${count} 条`, 'ok');
+    toast(`已导入 ${count} 条到「${currentVault().name}」`, 'ok');
   } catch (err) {
     toast('导入失败：' + (err.message || err), 'err');
   }
@@ -1608,9 +2474,14 @@ $('#file-input').addEventListener('change', async (e) => {
 /* ---------------- 快捷键 ---------------- */
 window.addEventListener('keydown', (e) => {
   const mod = e.metaKey || e.ctrlKey;
-  if (mod && e.key.toLowerCase() === 'k') {
+  if (mod && (e.key.toLowerCase() === 'k' || e.key.toLowerCase() === 'f')) {
     e.preventDefault();
     if (state.unlocked) $('#search').focus();
+    return;
+  }
+  if (mod && e.shiftKey && e.key.toLowerCase() === 'n') {
+    e.preventDefault();
+    if (state.unlocked) createFolder(null);
     return;
   }
   if (mod && e.key.toLowerCase() === 'l') {

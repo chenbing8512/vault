@@ -294,6 +294,36 @@ fn export_backup(state: State<'_, AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    let u = url.trim();
+    let lower = u.to_lowercase();
+    // 只放行 http/https，避免被构造成执行任意命令
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Err("只支持 http/https 链接".to_string());
+    }
+    if u.contains('\n') || u.contains('\r') || u.contains('\0') {
+        return Err("链接格式不正确".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open").arg(u).status();
+
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "start", "", u])
+        .status();
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = std::process::Command::new("xdg-open").arg(u).status();
+
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(_) => Err("没能打开浏览器".to_string()),
+        Err(e) => Err(format!("打开失败：{e}")),
+    }
+}
+
+#[tauri::command]
 fn list_backups(state: State<'_, AppState>) -> Vec<BackupInfo> {
     let mut list: Vec<BackupInfo> = fs::read_dir(&state.backup_dir)
         .map(|rd| {
@@ -447,7 +477,8 @@ fn main() {
             export_backup,
             list_backups,
             restore_backup,
-            export_text
+            export_text,
+            open_url
         ])
         .run(tauri::generate_context!())
         .expect("应用启动失败");
