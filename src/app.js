@@ -129,6 +129,22 @@ function escapeHtml(s) {
   }[c]));
 }
 
+/* 家目录缩写，长路径不撑破设置面板 */
+function shortPath(p) {
+  if (!p) return '-';
+  const m = p.match(/^\/Users\/[^/]+/) || p.match(/^[A-Za-z]:\\Users\\[^\\]+/);
+  return m ? p.replace(m[0], '~') : p;
+}
+
+/* 备份时间：同年省掉年份 */
+function fmtBkTime(sec) {
+  if (!sec) return '-';
+  const d = new Date(sec * 1000);
+  const p2 = (n) => String(n).padStart(2, '0');
+  const y = d.getFullYear() === new Date().getFullYear() ? '' : `${d.getFullYear()}-`;
+  return `${y}${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+}
+
 function fmtDate(ts) {
   if (!ts) return '';
   const d = new Date(ts);
@@ -376,9 +392,37 @@ const store = {
     if (IS_DESKTOP) return invoke('list_backups');
     return [];
   },
-  async restore(name) {
-    if (IS_DESKTOP) return invoke('restore_backup', { name });
+  async restore(name, dir) {
+    if (IS_DESKTOP) return invoke('restore_backup', { name, dir });
     throw new Error('浏览器模式不支持从备份恢复');
+  },
+  async deleteBackup(name, dir) {
+    if (IS_DESKTOP) return invoke('delete_backup', { name, dir });
+    throw new Error('浏览器模式不支持删除备份');
+  },
+  async backupConfig() {
+    if (IS_DESKTOP) return invoke('backup_config');
+    return { primary: '-', extra: null };
+  },
+  async setBackupDir(path) {
+    if (IS_DESKTOP) return invoke('set_backup_dir', { path });
+    throw new Error('浏览器模式不支持自定义备份目录');
+  },
+  async pickBackupDir() {
+    if (IS_DESKTOP) return invoke('pick_backup_dir');
+    return null;
+  },
+  async revealDir(path) {
+    if (IS_DESKTOP) return invoke('reveal_dir', { path });
+    throw new Error('浏览器模式不支持打开目录');
+  },
+  async probeBackups() {
+    if (IS_DESKTOP) return invoke('probe_backups');
+    return [];
+  },
+  async restoreFromPath(path) {
+    if (IS_DESKTOP) return invoke('restore_from_path', { path });
+    throw new Error('浏览器模式不支持恢复');
   },
   async exportText(content, filename) {
     if (IS_DESKTOP) return invoke('export_text', { content, filename });
@@ -639,6 +683,9 @@ function setGateMode(mode) {
   $('#strength').classList.toggle('hidden', !isCreate);
   $('#gate-submit').textContent = isCreate ? '创建并进入' : '解锁';
   $('#gate-error').textContent = '';
+  // 新建时有醒目的探测区，就不重复挂链接了
+  const link = $('#gate-restore');
+  if (link) link.classList.toggle('hidden', isCreate);
   setTimeout(() => $('#pwd').focus(), 60);
 }
 
@@ -682,6 +729,17 @@ $('#peek').addEventListener('click', () => {
   const p = $('#pwd');
   p.type = p.type === 'password' ? 'text' : 'password';
   p.focus();
+});
+
+/* 解锁页的「从备份恢复」：主文件被删、密码忘了、换机器都靠它 */
+$('#gate-restore').addEventListener('click', async () => {
+  let found = [];
+  try { found = await store.probeBackups(); } catch (_) {}
+  if (!found.length) {
+    toast('没找到可恢复的备份。可把 vault-*.dat 放进桌面或文稿再试', 'err');
+    return;
+  }
+  showRecoverList(found);
 });
 
 $('#gate-form').addEventListener('submit', async (e) => {
@@ -2722,7 +2780,9 @@ $('#menu-btn').addEventListener('click', async () => {
   const card = $('#modal-card');
   card.classList.add('wide');
   let backups = [];
+  let bkCfg = { primary: '', extra: null };
   try { backups = await store.listBackups(); } catch (_) {}
+  try { bkCfg = await store.backupConfig(); } catch (_) {}
 
   const seg = (key, opts) => `<div class="seg">${opts.map(([v, label]) =>
     `<button data-pref="${key}" data-v="${v}" class="${prefs[key] === v ? 'on' : ''}">${label}</button>`).join('')}</div>`;
@@ -2783,12 +2843,42 @@ $('#menu-btn').addEventListener('click', async () => {
     </div>
 
     <div class="section-label">自动备份（${backups.length} 份）</div>
+    <div class="bk-cfg">
+      <div class="bk-cfg-row">
+        <div class="bk-cfg-txt">
+          <div class="label">内置位置<span class="bk-badge">应用目录内</span></div>
+          <div class="desc ellipsis" title="${escapeHtml(bkCfg.primary)}">${escapeHtml(shortPath(bkCfg.primary))}</div>
+        </div>
+        <button class="ghost-btn sm" data-bk-open="${escapeHtml(bkCfg.primary)}">打开</button>
+      </div>
+      <div class="bk-cfg-row">
+        <div class="bk-cfg-txt">
+          <div class="label">额外位置${bkCfg.extra ? '<span class="bk-badge ok">已启用</span>' : '<span class="bk-badge warn">未设置</span>'}</div>
+          ${bkCfg.extra
+            ? `<div class="desc ellipsis" title="${escapeHtml(bkCfg.extra)}">${escapeHtml(shortPath(bkCfg.extra))}</div>`
+            : `<div class="desc">建议设成「文稿」里的文件夹 —— 删掉 App 时备份不会跟着消失</div>`}
+        </div>
+        <span class="bk-cfg-acts">
+          ${bkCfg.extra ? '' : '<button class="ghost-btn sm" id="bk-default">用文稿</button>'}
+          <button class="ghost-btn sm" id="bk-pick">${bkCfg.extra ? '更换' : '选择…'}</button>
+          ${bkCfg.extra ? `<button class="ghost-btn sm" data-bk-open="${escapeHtml(bkCfg.extra)}">打开</button><button class="ghost-btn sm danger" id="bk-clear">清除</button>` : ''}
+        </span>
+      </div>
+    </div>
     <div class="backup-list" id="backup-list">
       ${backups.length ? backups.map((b) => `
         <div class="backup-row">
-          <span>${escapeHtml(b.name.replace('vault-', '').replace('.dat', ''))} · ${(b.size / 1024).toFixed(1)} KB</span>
-          <button data-restore-bk="${escapeHtml(b.name)}">恢复</button>
-        </div>`).join('') : '<div style="color:var(--muted);font-size:13px;padding:8px 2px">首次保存后会自动生成</div>'}
+          <span class="bk-main">
+            <span class="bk-when">${fmtBkTime(b.modified)}</span>
+            <span class="bk-size">${(b.size / 1024).toFixed(1)} KB</span>
+            <span class="bk-tag ${b.dir === 'extra' ? 'ok' : ''}">${b.dir === 'extra' ? '额外' : '内置'}</span>
+            ${/-before-restore\.dat$/.test(b.name) ? '<span class="bk-tag warn">恢复前快照</span>' : ''}
+          </span>
+          <span class="bk-acts">
+            <button data-restore-bk="${escapeHtml(b.name)}" data-bk-dir="${b.dir}">恢复</button>
+            <button class="danger" data-del-bk="${escapeHtml(b.name)}" data-bk-dir="${b.dir}">删除</button>
+          </span>
+        </div>`).join('') : '<div class="bk-empty">首次保存后会自动生成</div>'}
     </div>
 
     <div class="modal-actions">
@@ -2844,21 +2934,93 @@ $('#menu-btn').addEventListener('click', async () => {
   });
   $('#set-import').addEventListener('click', () => $('#file-input').click());
 
+  const reopenSettings = () => { closeModal(); setTimeout(() => $('#menu-btn').click(), 0); };
+
   $$('#backup-list [data-restore-bk]').forEach((b) =>
     b.addEventListener('click', async () => {
       const ok = await confirmDialog({
         title: '从备份恢复？',
-        desc: '会覆盖当前全部数据，恢复后需要用<strong>该备份创建时的主密码</strong>重新解锁。',
+        desc: '会覆盖当前全部数据，恢复后需要用<strong>该备份创建时的主密码</strong>重新解锁。覆盖前程序会先给当前数据留一份快照。',
         okText: '恢复',
         danger: true,
       });
       if (!ok) return;
       try {
-        await store.restore(b.dataset.restoreBk);
+        await store.restore(b.dataset.restoreBk, b.dataset.bkDir);
         closeModal();
         await doLock(true);
         toast('已恢复，请用该备份时的主密码解锁', 'ok');
       } catch (e) { toast(String(e.message || e), 'err'); }
+    })
+  );
+
+  $$('#backup-list [data-del-bk]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      const ok = await confirmDialog({
+        title: '删除这份备份？',
+        desc: `将删除 <strong>${escapeHtml(b.dataset.delBk)}</strong>，删除后无法找回。当前密码库不受影响。`,
+        okText: '删除',
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        await store.deleteBackup(b.dataset.delBk, b.dataset.bkDir);
+        toast('已删除', 'ok');
+        reopenSettings();
+      } catch (e) { toast(String(e.message || e), 'err'); }
+    })
+  );
+
+  $('#bk-pick').addEventListener('click', async () => {
+    let p = null;
+    try {
+      p = await store.pickBackupDir();
+    } catch (e) {
+      // 系统选择框不可用（或被策略禁用）时，退回手填
+      const r = await promptDialog({
+        title: '输入备份目录',
+        desc: '系统选择框不可用，直接填一个路径。目录不存在会自动创建。',
+        fields: [{ key: 'path', placeholder: '~/Documents/Vault Backups', value: '~/Documents/Vault Backups' }],
+        okText: '使用',
+      });
+      p = r && r.path ? r.path.trim() : null;
+    }
+    if (!p) return;
+    try {
+      await store.setBackupDir(p);
+      toast('额外备份位置已更新', 'ok');
+      reopenSettings();
+    } catch (e) { toast(String(e.message || e), 'err'); }
+  });
+
+  const defBtn = $('#bk-default');
+  if (defBtn) defBtn.addEventListener('click', async () => {
+    try {
+      await store.setBackupDir('~/Documents/Vault Backups');
+      toast('已设为 ~/Documents/Vault Backups', 'ok');
+      reopenSettings();
+    } catch (e) { toast(String(e.message || e), 'err'); }
+  });
+
+  const clearBtn = $('#bk-clear');
+  if (clearBtn) clearBtn.addEventListener('click', async () => {
+    const ok = await confirmDialog({
+      title: '清除额外备份位置？',
+      desc: '只停止往那个目录继续写备份，<strong>已经存在的备份文件不会被删除</strong>。',
+      okText: '清除',
+    });
+    if (!ok) return;
+    try {
+      await store.setBackupDir(null);
+      toast('已清除额外位置', 'ok');
+      reopenSettings();
+    } catch (e) { toast(String(e.message || e), 'err'); }
+  });
+
+  $$('[data-bk-open]', card).forEach((b) =>
+    b.addEventListener('click', async () => {
+      try { await store.revealDir(b.dataset.bkOpen); }
+      catch (e) { toast(String(e.message || e), 'err'); }
     })
   );
 });
@@ -3039,6 +3201,78 @@ window.addEventListener('keydown', (e) => {
 
 $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') closeModal(); });
 
+/* ---------------- 首次运行：找回历史备份 ---------------- */
+async function tryRecoverFrom(path) {
+  const ok = await confirmDialog({
+    title: '用这份备份恢复？',
+    desc: '会用这份备份替换当前数据文件，之后请用<strong>那份备份创建时的主密码</strong>解锁。当前数据若已有内容，程序会先留一份快照。',
+    okText: '恢复',
+  });
+  if (!ok) return;
+  try {
+    await store.restoreFromPath(path);
+    state.meta = await store.status();
+    $('#gate-recover').classList.add('hidden');
+    setGateMode('unlock');
+    toast('已恢复，请输入当时的主密码', 'ok');
+  } catch (e) { toast(String(e.message || e), 'err'); }
+}
+
+function showRecoverList(found) {
+  const card = $('#modal-card');
+  card.classList.remove('wide');
+  card.innerHTML = `
+    <h3>历史备份</h3>
+    <p class="modal-sub">这些是从备份目录、桌面、文稿和下载里找到的。选一份恢复，之后用它的主密码解锁。</p>
+    <div class="backup-list" style="max-height:none">
+      ${found.map((f, i) => `
+        <div class="backup-row">
+          <span class="bk-main">
+            <span class="bk-when">${fmtBkTime(f.modified)}</span>
+            <span class="bk-size">${(f.size / 1024).toFixed(1)} KB</span>
+            <span class="bk-tag">${escapeHtml(f.source)}</span>
+          </span>
+          <span class="bk-acts"><button data-recover-path="${i}">恢复</button></span>
+        </div>`).join('')}
+    </div>
+    <div class="modal-actions"><button class="ghost-btn" id="recover-list-close">关闭</button></div>`;
+  $('#modal').classList.remove('hidden');
+  $('#recover-list-close').addEventListener('click', closeModal);
+  $$('[data-recover-path]', card).forEach((b) =>
+    b.addEventListener('click', () => {
+      closeModal();
+      tryRecoverFrom(found[+b.dataset.recoverPath].path);
+    })
+  );
+}
+
+async function probeAndOfferRecover() {
+  const box = $('#gate-recover');
+  if (!box) return;
+  let found = [];
+  try { found = await store.probeBackups(); } catch (_) { return; }
+  if (!found.length) { box.classList.add('hidden'); return; }
+
+  const top = found[0];
+  box.classList.remove('hidden');
+  box.innerHTML = `
+    <div class="recover-head">
+      <span class="recover-dot"></span>
+      检测到 ${found.length} 份历史备份
+    </div>
+    <div class="recover-sub">最近一份 ${fmtBkTime(top.modified)} · ${(top.size / 1024).toFixed(1)} KB · ${escapeHtml(top.source)}</div>
+    <div class="recover-acts">
+      <button class="primary sm" id="recover-go">用它恢复</button>
+      ${found.length > 1 ? `<button class="ghost-btn sm" id="recover-more">全部 ${found.length} 份</button>` : ''}
+      <button class="ghost-btn sm" id="recover-skip">跳过，新建</button>
+    </div>`;
+
+  $('#recover-skip').addEventListener('click', () => box.classList.add('hidden'));
+  $('#recover-go').addEventListener('click', () => tryRecoverFrom(top.path));
+  const more = $('#recover-more');
+  if (more) more.addEventListener('click', () => showRecoverList(found));
+}
+
 /* ---------------- 启动 ---------------- */
 (async function boot() {
   loadPrefs();
@@ -3048,6 +3282,10 @@ $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') clos
     state.meta = { exists: false, path: '', backupDir: '' };
   }
   setGateMode(state.meta.exists ? 'unlock' : 'create');
+  if (!state.meta.exists) {
+    // 主文件不在，但备份可能还在 —— 先问一句，别让用户以为数据没了
+    probeAndOfferRecover();
+  }
   window.addEventListener('beforeunload', () => {
     if (state.unlocked && state.dirty) { try { store.save(serialize()); } catch (_) {} }
   });

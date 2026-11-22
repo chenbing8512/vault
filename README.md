@@ -54,7 +54,8 @@
 **其他**
 - 自动锁定时间可调（1/5/15/30 分钟或关闭）
 - 剪贴板自动清除时间可调（15/30/60 秒或关闭）
-- 按天自动备份，保留 12 份，可在设置里一键恢复
+- 按天自动备份，保留 12 份；可再指定一个自定义备份目录（如 `~/Documents/Vault Backups`）双写一份，删 App 不会连备份一起没。备份可逐条恢复/删除
+- 主文件不存在时启动会自动搜寻桌面、文稿、下载里的 `vault-*.dat` 并提示恢复；解锁页也常驻「从备份恢复」入口
 - CSV 导入（Chrome / Bitwarden / 1Password 等通用表头）、CSV 导出（明文，有二次确认）、加密备份导出
 - 键盘导航：`↑` `↓` 切换条目
 
@@ -67,7 +68,7 @@
 | 主密码 | 只用于派生密钥，**绝不落盘**，忘记即无法恢复 |
 | 内存密钥 | 锁定时主动清零，进程退出即释放 |
 | 写盘 | 先写临时文件 + fsync，再原子重命名，避免断电写坏 |
-| 自动备份 | 每次保存按天自动留一份，最多保留 12 份 |
+| 自动备份 | 每次保存按天留一份，保留 12 份；可设第二个目录双写，避免备份与应用目录同生共死 |
 | 剪贴板 | 复制密码后按设定时间自动清空 |
 | 自动锁定 | 无操作达到设定时长后自动锁定并清空内存数据 |
 
@@ -75,28 +76,34 @@
 
 ## 数据结构
 
-`vault.dat` 解密后是一段 JSON（v3）：
+`vault.dat` 解密后是一段 JSON（当前 v4）：
 
 ```jsonc
 {
-  "version": 3,
+  "version": 4,
   "vaults":  [{ "id": "v-self", "name": "个人", "color": "#6f8cff" }],
   "folders": [{ "id": "f1", "name": "客户 A", "parentId": null, "vaultId": "v-self" }],
+  "tags":    [{ "name": "工作", "color": "#6f8cff" }],
   "items":   [{ "id": "a1", "kind": "login", "title": "...", "vaultId": "v-self",
-                "folderId": "f1", "tags": ["生产"], "archivedAt": null, "usedAt": 0 }],
-  "curVaultId": "v-self"
+                "folderId": "f1", "tags": ["工作"], "archivedAt": null, "usedAt": 0 }],
+  "curVaultId": "v-self",
+  "settings": {}
 }
 ```
 
-v1 / v2 的旧数据在解锁时自动迁移：补一个默认保险库、补空标签数组，文件仍用同一把主密码，不会丢内容。
+v1~v3 的旧数据在解锁时自动迁移：补默认保险库、补空标签数组、扫描条目把用过的标签登记进 `tags` 表。文件仍用同一把主密码，不会丢内容。
 
 ## 数据存放位置
 
 - macOS：`~/Library/Application Support/com.local.vault/vault.dat`
 - Windows：`%APPDATA%\com.local.vault\vault.dat`
-- 自动备份：上面目录下的 `backups/` 文件夹
+- 内置备份：上面目录下的 `backups/` 文件夹（每天一份，留 12 份）
+- 额外备份：设置里指定的任意文件夹（默认建议 `~/Documents/Vault Backups`），同样每天一份
+- 偏好文件：上面目录下的 `prefs.json`，只存备份目录路径，不含密钥
 
 `vault.dat` 本身就是密文，可以直接拷到 U 盘或网盘做冷备份。
+
+> 注意：内置备份和主文件在同一个目录里，整个目录被删（比如清理工具删 App 时连带删除 Application Support 下的同名文件夹）就一起没了。所以要么设一个额外备份目录，要么定期「导出加密备份」到桌面/网盘。
 
 ## 快捷键
 
@@ -150,7 +157,7 @@ vault/
 │   ├── style.css            # 含 5 套主题的 CSS 变量
 │   └── app.js               # 界面逻辑、组织模型、TOTP、体检、导入导出；浏览器直开时降级为 WebCrypto
 ├── src-tauri/
-│   ├── src/main.rs          # 加密、存储、备份、打开链接等全部原生操作 + 6 项单元测试
+│   ├── src/main.rs          # 加密、存储、备份、打开链接等全部原生操作 + 9 项单元测试
 │   ├── tauri.conf.json
 │   └── icons/
 └── make_icon.swift          # 图标生成脚本（改配色后重跑即可）

@@ -1,6 +1,6 @@
 [package]
 name = "vault"
-version = "1.4.1"
+version = "1.5.0"
 description = "本地离线加密密码库"
 authors = ["local"]
 edition = "2021"
