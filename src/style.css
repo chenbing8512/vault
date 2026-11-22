@@ -347,6 +347,11 @@ input, textarea { user-select: text; }
 .tag-mini:hover { color: var(--text); background: rgba(var(--tint), 0.09); }
 .tag-mini.on { color: var(--on-accent); background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
 .tag-empty { font-size: 11px; color: var(--faint); padding: 2px 8px 6px; line-height: 1.6; }
+.tag-empty-add {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  border-radius: 7px; transition: color 0.14s, background 0.14s;
+}
+.tag-empty-add:hover { color: var(--text); background: rgba(var(--tint), 0.05); }
 
 .nav-foot { padding: 9px 10px 11px; border-top: 1px solid var(--border); }
 .add-btn {

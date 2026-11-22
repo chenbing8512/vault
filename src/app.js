@@ -798,7 +798,8 @@ function renderFolderTree() {
   const box = $('#folder-tree');
   const roots = childFolders(null);
   if (!roots.length) {
-    box.innerHTML = `<div class="tag-empty">还没有文件夹<br>用「＋」按项目或用途分一层</div>`;
+    box.innerHTML = `<button class="tag-empty tag-empty-add">还没有文件夹<br>用「＋」按项目或用途分一层</button>`;
+    box.querySelector('.tag-empty-add').addEventListener('click', () => createFolder(null));
     return;
   }
   const walk = (list, depth) => list.map((f) => {
@@ -1884,6 +1885,12 @@ function createItem(kind) {
 }
 
 $('#add-btn').addEventListener('click', addItem);
+
+/* 侧栏「文件夹」标题右侧的 ＋ */
+$('#add-folder').addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (state.unlocked) createFolder(null);
+});
 
 /* ---------------- 搜索 ---------------- */
 $('#search').addEventListener('input', (e) => {
