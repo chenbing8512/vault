@@ -597,6 +597,26 @@ function ensureTag(name, color) {
 /* 当前库里用到该标签的条目数 */
 const tagUsage = (name) => vaultLive().filter((i) => (i.tags || []).includes(name)).length;
 
+/* 当前 scope 选中的标签（支持多选叠加，全部满足才算命中） */
+function tagIdsOf(sc) {
+  if (!sc || sc.type !== 'tag') return [];
+  if (Array.isArray(sc.ids) && sc.ids.length) return sc.ids;
+  return sc.id ? [sc.id] : [];
+}
+
+/* 点标签：普通点击=单选；⌘/Ctrl/Shift 点击=叠加或取消 */
+function setTagScope(name, additive) {
+  const cur = tagIdsOf(state.scope);
+  let next;
+  if (additive) {
+    next = cur.includes(name) ? cur.filter((n) => n !== name) : [...cur, name];
+  } else {
+    next = cur.length === 1 && cur[0] === name ? [] : [name];
+  }
+  if (!next.length) { setScope('all', null); return; }
+  setScope('tag', next[0], next);
+}
+
 /* 全部标签（含 0 条目的空标签），按用量降序 */
 function allTags() {
   const map = new Map();
@@ -706,7 +726,7 @@ function enterApp() {
   $('#gate').classList.add('hidden');
   $('#main').classList.remove('hidden');
   state.view = 'item';
-  state.scope = { type: 'all', id: null };
+  state.scope = { type: 'all', id: null, ids: [] };
   state.filter = 'all';
   cleanTrashOnBoot();
   renderNav();
@@ -743,7 +763,7 @@ async function doLock(silent) {
   state.query = '';
   state.filter = 'all';
   state.view = 'item';
-  state.scope = { type: 'all', id: null };
+  state.scope = { type: 'all', id: null, ids: [] };
   $('#search').value = '';
   $('#list').innerHTML = '';
   $('#detail').innerHTML = '';
@@ -865,9 +885,9 @@ function renderFolderTree() {
 const TAG_SIDE_LIMIT = 14;
 
 function tagChipHtml(t) {
-  const on = state.scope.type === 'tag' && state.scope.id === t.name;
-  return `<button class="tag-mini ${on ? 'on' : ''}" data-tag="${escapeHtml(t.name)}"
-      title="右键管理「${escapeHtml(t.name)}」">
+  const on = tagIdsOf(state.scope).includes(t.name);
+  return `<button class="tag-mini ${on ? 'on' : ''}" data-tag="${escapeHtml(t.name)}" draggable="true"
+      title="⌘ 点击叠加筛选 · 拖到条目 / 文件夹上打标签 · 右键管理">
     ${t.color ? `<i class="tag-dot" style="background:${t.color}"></i>` : ''}
     <span class="tag-txt">${escapeHtml(t.name)}</span><span class="tag-n">${t.count}</span>
   </button>`;
@@ -941,7 +961,11 @@ function applyRename(from, to) {
   if (dst) state.tags = state.tags.filter((t) => t.name !== from);
   else if (src) src.name = to;
   else ensureTag(to);
-  if (state.scope.type === 'tag' && state.scope.id === from) state.scope = { type: 'tag', id: to };
+  const scIds = tagIdsOf(state.scope);
+  if (scIds.includes(from)) {
+    const next = Array.from(new Set(scIds.map((n) => (n === from ? to : n))));
+    state.scope = { type: 'tag', id: next[0], ids: next };
+  }
   tagRefresh();
 }
 
@@ -966,7 +990,10 @@ function removeTag(name) {
     if (Array.isArray(i.tags)) i.tags = i.tags.filter((t) => t !== name);
   });
   state.tags = state.tags.filter((t) => t.name !== name);
-  if (state.scope.type === 'tag' && state.scope.id === name) state.scope = { type: 'all', id: null };
+  const rest = tagIdsOf(state.scope).filter((n) => n !== name);
+  state.scope = rest.length
+    ? { type: 'tag', id: rest[0], ids: rest }
+    : { type: 'all', id: null, ids: [] };
   tagRefresh();
 }
 
@@ -1083,8 +1110,111 @@ function openTagManager() {
   }));
 }
 
-function setScope(type, id) {
-  state.scope = { type, id: id || null };
+/* ---------------- 拖拽：侧栏标签 → 条目 / 文件夹 ---------------- */
+let dragTag = null;
+let lastDropAt = 0;
+let dropEl = null;
+
+function clearDropMark() {
+  if (dropEl) { dropEl.classList.remove('drop-ok'); dropEl = null; }
+}
+
+/* 落点：列表条目，或侧栏文件夹（含子文件夹里的条目） */
+function dropTargetAt(el) {
+  const itemEl = el && el.closest ? el.closest('#list .item[data-id]') : null;
+  if (itemEl) return { el: itemEl, kind: 'item', id: itemEl.dataset.id };
+  const fEl = el && el.closest ? el.closest('#folder-tree .nav-item[data-scope="folder"]') : null;
+  if (fEl) return { el: fEl, kind: 'folder', id: fEl.dataset.sid };
+  return null;
+}
+
+/* 给一批条目挂标签，返回真正新增的条数 */
+function applyTagToItems(items, raw) {
+  const n = normTag(raw);
+  if (!n) return 0;
+  ensureTag(n);
+  let added = 0;
+  items.forEach((i) => {
+    i.tags = i.tags || [];
+    if (!i.tags.includes(n)) { i.tags.push(n); i.updatedAt = Date.now(); added++; }
+  });
+  return added;
+}
+
+function endDragVisuals() {
+  document.body.classList.remove('tag-dragging');
+  $$('#tag-list .tag-mini.dragging').forEach((el) => el.classList.remove('dragging'));
+  clearDropMark();
+}
+
+document.addEventListener('dragstart', (e) => {
+  const chip = e.target.closest ? e.target.closest('#tag-list [data-tag]') : null;
+  if (!chip) return;
+  dragTag = chip.dataset.tag;
+  chip.classList.add('dragging');
+  document.body.classList.add('tag-dragging');
+  try {
+    e.dataTransfer.effectAllowed = 'copy';
+    e.dataTransfer.setData('text/plain', 'vault-tag:' + dragTag);
+  } catch (_) {}
+});
+
+document.addEventListener('dragend', () => {
+  dragTag = null;
+  endDragVisuals();
+});
+
+document.addEventListener('dragover', (e) => {
+  if (!dragTag) return;
+  const t = dropTargetAt(e.target);
+  if (!t) return;
+  e.preventDefault();
+  try { e.dataTransfer.dropEffect = 'copy'; } catch (_) {}
+  if (dropEl !== t.el) { clearDropMark(); t.el.classList.add('drop-ok'); dropEl = t.el; }
+});
+
+document.addEventListener('dragleave', (e) => {
+  if (!dragTag) return;
+  if (!dropTargetAt(e.target)) clearDropMark();
+});
+
+document.addEventListener('drop', (e) => {
+  if (!dragTag) return;
+  /* 只要在拖标签，就吃掉默认行为，免得 text/plain 被插进搜索框 */
+  e.preventDefault();
+  const t = dropTargetAt(e.target);
+  if (!t) { dragTag = null; lastDropAt = Date.now(); endDragVisuals(); return; }
+  const tag = dragTag;
+  lastDropAt = Date.now();
+  dragTag = null;
+  endDragVisuals();
+
+  if (t.kind === 'item') {
+    const it = state.items.find((x) => x.id === t.id);
+    if (!it) return;
+    if ((it.tags || []).includes(tag)) { toast(`「${it.title || '未命名'}」已经有 #${tag}`); return; }
+    applyTagToItems([it], tag);
+    tagRefresh();
+    toast(`已给「${it.title || '未命名'}」加上 #${tag}`);
+    return;
+  }
+
+  const f = folderById(t.id);
+  const set = folderSubtree(t.id);
+  const targets = vaultLive().filter((i) => i.folderId && set.has(i.folderId));
+  if (!targets.length) { toast('这个文件夹里还没有条目', 'err'); return; }
+  const added = applyTagToItems(targets, tag);
+  tagRefresh();
+  toast(added
+    ? `已给「${f ? f.name : '文件夹'}」里 ${added} 条加上 #${tag}`
+    : `「${f ? f.name : '文件夹'}」里的条目都已有 #${tag}`);
+});
+
+function setScope(type, id, ids) {
+  const tagIds = type === 'tag'
+    ? (Array.isArray(ids) && ids.length ? ids.slice() : (id ? [id] : []))
+    : [];
+  state.scope = { type, id: id || tagIds[0] || null, ids: tagIds };
   state.view = (type === 'audit' || type === 'trash') ? type : 'item';
   state.selectedId = null;
   state.filter = 'all';
@@ -1115,8 +1245,12 @@ document.addEventListener('click', (e) => {
   const tagManage = e.target.closest('[data-tag-manage]');
   if (tagManage) { openTagManager(); return; }
 
-  const tagBtn = e.target.closest('[data-tag]');
-  if (tagBtn) { setScope('tag', tagBtn.dataset.tag); return; }
+  const tagBtn = e.target.closest('#tag-list [data-tag]');
+  if (tagBtn) {
+    if (Date.now() - lastDropAt < 350) return;  // 拖拽结束后的误触
+    setTagScope(tagBtn.dataset.tag, e.metaKey || e.ctrlKey || e.shiftKey);
+    return;
+  }
 
   const moreBtn = e.target.closest('[data-more]');
   if (moreBtn) {
@@ -1229,7 +1363,12 @@ function scopeTitle() {
     case 'fav': return '收藏';
     case 'recent': return '最近使用';
     case 'folder': return folderPath(sc.id) || '文件夹';
-    case 'tag': return '#' + sc.id;
+    case 'tag': {
+      const ids = tagIdsOf(sc);
+      if (!ids.length) return '标签';
+      if (ids.length === 1) return '#' + ids[0];
+      return '#' + ids.slice(0, 2).join(' + #') + (ids.length > 2 ? ` +${ids.length - 2}` : '');
+    }
     case 'archived': return '归档';
     case 'audit': return '密码体检';
     case 'trash': return '回收站';
@@ -1243,7 +1382,11 @@ function scopeBase() {
     const set = folderSubtree(sc.id);
     return vaultLive().filter((i) => i.folderId && set.has(i.folderId));
   }
-  if (sc.type === 'tag' && sc.id) return vaultLive().filter((i) => (i.tags || []).includes(sc.id));
+  if (sc.type === 'tag') {
+    const ids = tagIdsOf(sc);
+    if (ids.length) return vaultLive().filter((i) => ids.every((n) => (i.tags || []).includes(n)));
+    return vaultLive();
+  }
   if (sc.type === 'recent') {
     return vaultLive().filter((i) => i.usedAt).sort((a, b) => b.usedAt - a.usedAt).slice(0, 20);
   }
@@ -1288,8 +1431,11 @@ function renderList() {
   const list = visibleItems();
   const box = $('#list');
   const isTrash = state.view === 'trash';
+  const tagIds = tagIdsOf(state.scope);
   $('#count').textContent = isTrash ? `${trashedItems().length} 条` : `${list.length} 条${state.query ? '匹配' : ''}`;
   $('#scope-title').textContent = scopeTitle();
+  const clearBtn = $('#scope-clear');
+  if (clearBtn) clearBtn.classList.toggle('hidden', tagIds.length < 2);
 
   if (isTrash) {
     box.innerHTML = `<div class="empty-list">回收站是独立视图<br><span style="opacity:.7">已删除的条目和恢复操作都在右侧</span></div>`;
@@ -1300,7 +1446,9 @@ function renderList() {
     const empty = state.query ? '没有匹配的条目' :
       state.scope.type === 'archived' ? '归档是空的<br><span style="opacity:.7">归档只隐藏条目，不会删除</span>' :
       state.scope.type === 'folder' ? '这个文件夹还是空的<br><span style="opacity:.7">在条目详情里选「移动到」就能放进来</span>' :
-      state.scope.type === 'tag' ? '这个标签下还没有条目' :
+      state.scope.type === 'tag' ? (tagIds.length > 1
+        ? '没有同时满足这些标签的条目<br><span style="opacity:.7">用 ⌘ 点标签可以减掉一个条件</span>'
+        : '这个标签下还没有条目<br><span style="opacity:.7">把侧栏标签拖到条目上就能挂上</span>') :
       '还没有任何记录<br>点左下角「新建条目」开始';
     box.innerHTML = `<div class="empty-list">${empty}</div>`;
     return;
@@ -1321,12 +1469,19 @@ function renderList() {
       const ch = firstChar(i.title || '未命名');
       if (ch !== lastChar) { lastChar = ch; sep = `<div class="list-sep">${escapeHtml(ch)}</div>`; }
     }
+    const tagDots = (i.tags || []).length
+      ? `<span class="tag-dots" title="${escapeHtml(i.tags.join(' · '))}">${i.tags.slice(0, 3).map((t) => {
+          const c = tagColorOf(t);
+          return `<i${c ? ` style="background:${c}"` : ''}></i>`;
+        }).join('')}${i.tags.length > 3 ? `<b>+${i.tags.length - 3}</b>` : ''}</span>`
+      : '';
     return sep + `<div class="item ${i.id === state.selectedId && state.view === 'item' ? 'active' : ''}" data-id="${i.id}">
       <div class="avatar" style="background:${av.bg}">${escapeHtml(av.ch)}</div>
       <div class="item-body">
         <div class="item-title">${escapeHtml(i.title || '未命名')}</div>
         <div class="item-sub">${escapeHtml(sub)}</div>
       </div>
+      ${tagDots}
       ${nSame > 1 ? `<span class="badge-multi" title="这个网站共 ${nSame} 个账号">${nSame}</span>` : ''}
       ${i.archivedAt ? '<span class="badge-arch">归档</span>' : ''}
       ${i.otp ? '<span class="badge-otp">2FA</span>' : ''}
@@ -2235,6 +2390,12 @@ function createItem(kind) {
 }
 
 $('#add-btn').addEventListener('click', addItem);
+
+/* 列表头「✕」：清掉多标签叠加条件 */
+$('#scope-clear').addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (state.unlocked) setScope('all', null);
+});
 
 /* 侧栏「文件夹」标题右侧的 ＋ */
 $('#add-folder').addEventListener('click', (e) => {

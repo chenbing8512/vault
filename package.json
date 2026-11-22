@@ -1,7 +1,7 @@
 {
   "name": "vault",
   "private": true,
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "本地离线加密密码库",
   "scripts": {
     "dev": "tauri dev",
