@@ -12,13 +12,16 @@ const ITERATIONS = 600000;
 const WEB_KEY = 'vault.envelope.v1';
 const PREFS_KEY = 'vault.prefs';
 const OLD_DAYS = 180;
-const APP_VERSION = '1.7.3';
+const APP_VERSION = '1.7.4';
 const DATA_VERSION = 4;
 const SYNC_VERSION_KEY = 'vault.syncVersion';
 const SYNC_SERVER = 'https://vault-sync.43.153.51.6.sslip.io/vault-sync';
 const LOGO_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10.5" width="16" height="10.5" rx="2.6" /><path d="M8 10.5V7.2a4 4 0 0 1 8 0v3.3" /><circle cx="12" cy="15.8" r="1.35" fill="currentColor" stroke="none" /></svg>';
 let returnToSettings = false;
-const syncCache = { at: 0, version: null, logs: null };   // 同步 tab 的 30s 缓存
+/* 同步页只读这里，切 tab 不发请求。
+   version 在 doSync 时顺带存下；logs 只在用户主动动作（手动同步 / 登录 / 点刷新）后拉一次；
+   lastSync* 记录上次同步结果，没网时看到的是这个而不是报错。 */
+const syncState = { version: null, logs: null, lastSyncAt: 0, lastSyncOk: null, lastSyncErr: '' };
 
 /* ---------------- 常量 ---------------- */
 const TYPES = [
@@ -553,10 +556,12 @@ async function doSync(manual = false) {
   const s = prefs.sync || {};
   if (!s.token || syncBusy) return false;
   syncBusy = true;
-  const label = manual ? '' : 'auto';
+  syncState.syncing = true;
+  if (settingsSection === 'sync') paintSyncVersion($('#settings-pane'));
   try {
     if (manual) toast('正在同步…', '', 600);
     const remote = await store.syncVersion();
+    syncState.version = remote;   // 顺手存下，切 tab 不用再查
     const localV = syncLocalVersion();
     let merged = false;
 
@@ -582,6 +587,7 @@ async function doSync(manual = false) {
       try {
         const nv = await store.syncPush(base);
         setSyncLocalVersion(nv);
+        syncState.version = { exists: true, version: nv };
         if (manual) toast(merged ? '已合并并同步（云端 v' + nv + '）' : '已上传到云端（v' + nv + '）', 'ok', 1800);
       } catch (e) {
         if (String(e.message || e).startsWith('CONFLICT')) {
@@ -592,24 +598,30 @@ async function doSync(manual = false) {
           loadData(m2); rerenderAll(); await persist(true);
           const nv = await store.syncPush(p2.version);
           setSyncLocalVersion(nv);
+          syncState.version = { exists: true, version: nv };
           if (manual) toast('云端有变化，已合并（v' + nv + '）', 'ok', 1800);
         } else throw e;
       }
     } else if (manual) {
       toast('已是最新（v' + remote.version + '）', 'ok', 1500);
     }
+    syncState.lastSyncOk = true; syncState.lastSyncErr = ''; syncState.lastSyncAt = Date.now();
     return true;
   } catch (e) {
-    const msg = String(e.message || e);
+    const msg = shortNetErr(e);
+    syncState.lastSyncOk = false; syncState.lastSyncErr = msg; syncState.lastSyncAt = Date.now();
     if (manual) toast('同步失败：' + msg, 'err', 4000);
     else console.warn('[sync]', msg);
     return false;
   } finally {
     syncBusy = false;
-    syncCache.at = 0;   // 同步过了，缓存作废
+    syncState.syncing = false;
+    const success = syncState.lastSyncOk === true && Date.now() - syncState.lastSyncAt < 1500;
     const pane = $('#settings-pane');
-    if (pane && $('#sync-status', pane) && $('#sync-logs', pane)) {
-      refreshSyncStatus(pane); loadSyncLogs(pane);
+    if (pane && $('#sync-status', pane)) {
+      paintSyncVersion(pane); paintSyncLogs(pane);
+      // 手动同步是用户主动动作，完成后拉一次记录（只拉日志，版本已经在内存里）
+      if (manual && success) refreshSyncPane(pane, { withVersion: false });
     }
   }
 }
@@ -3167,15 +3179,15 @@ function renderSetSync(pane) {
     </div>
     <div class="sync-status" id="sync-status"></div>
 
-    <div class="section-label">最近同步记录</div>
-    <div class="sync-logs" id="sync-logs"><div class="bk-empty">加载中…</div></div>`;
+    <div class="section-label">最近同步记录<button id="sync-refresh" title="从服务器重新拉取记录">刷新</button></div>
+    <div class="sync-logs" id="sync-logs"></div>`;
 
   if (s.token) {
     $('#sync-logout', pane).addEventListener('click', async () => {
       const ok = await confirmDialog({ title: '退出同步账号？', desc: '本地数据不受影响，只是不再同步。', okText: '退出' });
       if (!ok) return;
       prefs.sync.token = ''; prefs.sync.user = ''; savePrefs();
-      syncCache.at = 0; syncCache.version = null; syncCache.logs = null;
+      Object.assign(syncState, { version: null, logs: null, lastSyncAt: 0, lastSyncOk: null, lastSyncErr: '' });
       renderSettings();
     });
     $('#sync-now', pane).addEventListener('click', () => doSync(true));
@@ -3183,12 +3195,10 @@ function renderSetSync(pane) {
       prefs.sync.auto = e.target.checked; savePrefs();
       toast(e.target.checked ? '自动同步已开启' : '自动同步已关闭', 'ok', 1200);
     });
-    // 30s 内切回来不重新请求（之前每切一次 tab 就发 2 个 HTTPS 请求）
-    const fresh = syncCache.at && Date.now() - syncCache.at < 30000;
-    if (fresh && syncCache.version) paintSyncVersion(pane, syncCache.version);
-    else refreshSyncStatus(pane);
-    if (fresh && syncCache.logs) paintSyncLogs(pane, syncCache.logs);
-    else loadSyncLogs(pane);
+    // 切 tab 零请求：直接画内存里的状态
+    paintSyncVersion(pane);
+    paintSyncLogs(pane);
+    $('#sync-refresh', pane).addEventListener('click', () => refreshSyncPane(pane, true));
   } else {
     const submit = async (register) => {
       const u = $('#sync-user', pane).value.trim(), p = $('#sync-pass', pane).value;
@@ -3198,9 +3208,10 @@ function renderSetSync(pane) {
       try {
         const r = await store.syncLogin(u, p, register);
         prefs.sync.token = r.token; prefs.sync.user = r.user; prefs.sync.server = r.server; savePrefs();
-        syncCache.at = 0; syncCache.version = null; syncCache.logs = null;
+        Object.assign(syncState, { version: null, logs: null, lastSyncAt: 0, lastSyncOk: null, lastSyncErr: '' });
         toast(register ? '注册成功，已登录' : '登录成功', 'ok');
         renderSettings();
+        refreshSyncPane($('#settings-pane'), true);   // 登录是用户主动动作，拉一次版本+记录
       } catch (e) { toast(String(e.message || e), 'err'); }
       btn.disabled = false; btn.textContent = register ? '注册新账号' : '登录';
     };
@@ -3210,48 +3221,67 @@ function renderSetSync(pane) {
   }
 }
 
-function paintSyncVersion(pane, v) {
+function paintSyncVersion(pane) {
   const el = $('#sync-status', pane); if (!el) return;
-  const localV = +(localStorage.getItem('vault.syncVersion') || 0);
-  el.innerHTML = `<div class="sync-stat"><span>云端 ${v.exists ? 'v' + v.version : '空'}</span><span>本地已知 v${localV}</span><span class="${v.version > localV ? 'warn' : 'ok'}">${!v.exists ? '尚未上传' : v.version > localV ? '云端有新版本' : '已是最新'}</span></div>`;
+  const v = syncState.version;
+  const localV = syncLocalVersion();
+  let cloud;
+  if (!v) cloud = '<span class="muted">云端版本未知</span>';
+  else if (!v.exists) cloud = '<span>云端 空</span>';
+  else cloud = `<span>云端 v${v.version}</span><span>本地已知 v${localV}</span>` +
+    `<span class="${v.version > localV ? 'warn' : 'ok'}">${v.version > localV ? '云端有新版本，点「同步」拉取' : '已是最新'}</span>`;
+  let last = '';
+  if (syncState.syncing) last = '<span class="muted">正在同步…</span>';
+  else if (syncState.lastSyncOk === true) last = `<span class="ok">上次同步 ${fmtAgo(syncState.lastSyncAt)}成功</span>`;
+  else if (syncState.lastSyncOk === false) last = `<span class="err" title="${escapeHtml(syncState.lastSyncErr)}">上次同步失败：${escapeHtml(syncState.lastSyncErr)}</span>`;
+  el.innerHTML = `<div class="sync-stat">${cloud}${last}</div>`;
 }
 
-async function refreshSyncStatus(pane) {
-  const el = $('#sync-status', pane); if (!el) return;
-  el.innerHTML = '<div class="desc">检查云端…</div>';
-  try {
-    const v = await store.syncVersion();
-    if (!$('#sync-status', pane)) return;   // 用户已切走
-    syncCache.version = v; syncCache.at = Date.now();
-    paintSyncVersion(pane, v);
-  } catch (e) {
-    if ($('#sync-status', pane)) el.innerHTML = `<div class="desc" style="color:var(--danger)">${escapeHtml(String(e.message || e))}</div>`;
-  }
-}
-
-function paintSyncLogs(pane, r) {
+function paintSyncLogs(pane) {
   const el = $('#sync-logs', pane); if (!el) return;
-  const list = Array.isArray(r.list) ? r.list : [];
+  const list = Array.isArray(syncState.logs && syncState.logs.list) ? syncState.logs.list : [];
   const ACT = { push: '推送', pull: '拉取', conflict: '冲突', register: '注册', login: '登录', logout: '退出' };
-    el.innerHTML = list.length ? list.map((x) => `
-      <div class="sync-log-row">
-        <span class="bk-when">${fmtSyncTime(x.createdAt)}</span>
-        <span class="bk-tag">${ACT[x.action] || escapeHtml(x.action || '-')}</span>
-        <span class="${x.result === 'ok' ? 'ok' : 'err'}">${x.result === 'ok' ? '成功' : '拒绝'}</span>
-        <span class="desc ellipsis">${escapeHtml(x.detail || '')}${x.clientName ? ' · ' + escapeHtml(x.clientName) : ''}</span>
-      </div>`).join('') : '<div class="bk-empty">还没有同步记录</div>';
+  el.innerHTML = list.length ? list.map((x) => `
+    <div class="sync-log-row">
+      <span class="bk-when">${fmtSyncTime(x.createdAt)}</span>
+      <span class="bk-tag">${ACT[x.action] || escapeHtml(x.action || '-')}</span>
+      <span class="${x.result === 'ok' ? 'ok' : 'err'}">${x.result === 'ok' ? '成功' : '拒绝'}</span>
+      <span class="desc ellipsis">${escapeHtml(x.detail || '')}${x.clientName ? ' · ' + escapeHtml(x.clientName) : ''}</span>
+    </div>`).join('') : `<div class="bk-empty">${syncState.logs ? '还没有同步记录' : '点「刷新」从服务器拉取记录'}</div>`;
 }
 
-async function loadSyncLogs(pane) {
-  const el = $('#sync-logs', pane); if (!el) return;
-  try {
-    const r = await store.syncLogs();
-    if (!$('#sync-logs', pane)) return;   // 用户已切走
-    syncCache.logs = r; syncCache.at = Date.now();
-    paintSyncLogs(pane, r);
-  } catch (e) {
-    if ($('#sync-logs', pane)) el.innerHTML = `<div class="bk-empty">${escapeHtml(String(e.message || e))}</div>`;
+/* 只在用户主动动作后调用：手动同步后只拉日志（版本 doSync 已经拿到了）；点刷新才查版本。
+   失败不弹错误到页面上，只记在 lastSync */
+async function refreshSyncPane(pane, { withVersion = true, withLogs = true } = {}) {
+  if (!pane || !prefs.sync || !prefs.sync.token) return;
+  const btn = $('#sync-refresh', pane);
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  if (withVersion) {
+    try {
+      syncState.version = await store.syncVersion();
+    } catch (e) {
+      syncState.lastSyncOk = false; syncState.lastSyncErr = shortNetErr(e); syncState.lastSyncAt = Date.now();
+    }
   }
+  if (withLogs) {
+    try { syncState.logs = await store.syncLogs(); } catch (_) { /* 日志拉不到不算错，下次再说 */ }
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '刷新'; }
+  const p2 = $('#settings-pane');
+  if (p2 && $('#sync-status', p2)) { paintSyncVersion(p2); paintSyncLogs(p2); }
+}
+
+/* 把 reqwest 的底层错误翻译成人话 */
+function shortNetErr(e) {
+  let m = String(e.message || e);
+  // 去掉 reqwest 带 URL 的部分，别把服务器地址漏到界面上
+  m = m.replace(/error sending request for url \([^)]*\)/i, '').trim();
+  if (/timed?\s?out|timeout/i.test(m)) return '连接超时（无网络或服务器不可达）';
+  if (/dns|resolve|lookup|certificate|tls|handshake|ssl/i.test(m)) return '无法连接服务器';
+  if (/connection|connect|refused|reset|network|unreachable/i.test(m)) return '网络连接失败';
+  if (/sending request|request failed|客户端|请求/i.test(m)) return '网络连接失败';
+  m = m.replace(/https?:\/\/\S+/g, '').trim();
+  return m.length > 60 ? m.slice(0, 60) + '…' : (m || '未知错误');
 }
 
 /* 服务端 LocalDateTime 是无时区的 "2026-11-27T15:03:26"（北京时间），Safari/WebKit 对 "T" 直接 new Date 会得到 Invalid Date，手动拆 */
@@ -3501,7 +3531,8 @@ async function installUpdate(update) {
         if (ev.data.total) { const pct = Math.round(ev.data.chunkLength / ev.data.total * 100); toast('下载中… ' + pct + '%', '', 60000); }
       } else if (ev.event === 'Finished') toast('下载完成，正在安装…', 'ok', 60000);
     });
-    await (window.__TAURI__.process || window.__TAURI_PLUGIN_PROCESS__).restart();
+    // process 插件没有前端包，不会挂到 window.__TAURI__.process；直接走 invoke
+    await invoke('plugin:process|restart');
   } catch (e) {
     toast('更新失败：' + (e.message || e), 'err', 4000);
   }
