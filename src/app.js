@@ -116,7 +116,49 @@ const state = {
   meta: { exists: false, path: '', backupDir: '' },
 };
 
-const prefs = { theme: 'aurora', autolock: 5, clipClear: 30, trashDays: 30 };
+const prefs = { theme: 'aurora', autolock: 5, clipClear: 30, trashDays: 30, fontScale: 100, fontFamily: 'system' };
+
+/* ---------------- 字体与大小 ---------------- */
+/* 所有 font-size 都是 rem，改 html 根字号就能整体缩放。
+   基准 16px × scale；布局用 px 的地方（三栏宽度、图标、头像）保持不缩放，避免撑破。 */
+const FONT_SCALE_MIN = 80;
+const FONT_SCALE_MAX = 140;
+const FONT_SCALE_STEP = 5;
+
+/* 字体族预设：key 存在 prefs.fontFamily 里，CSS 里用 [data-font] 匹配 */
+const FONT_FAMILIES = [
+  { key: 'system',  name: '系统默认', css: '-apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif', desc: 'SF Pro + 苹方' },
+  { key: 'pingfang', name: '苹方', css: '"PingFang SC", "Hiragino Sans GB", -apple-system, sans-serif', desc: 'macOS 中文更饱满' },
+  { key: 'harmony', name: '鸿蒙黑体', css: '"HarmonyOS Sans SC", "MiSans", -apple-system, sans-serif', desc: '需已安装，否则回退' },
+  { key: 'source',  name: '思源黑体', css: '"Source Han Sans SC", "Noto Sans CJK SC", "Source Han Sans CN", -apple-system, sans-serif', desc: '需已安装，否则回退' },
+  { key: 'lxl',     name: '霞鹜文楷', css: '"LXGW WenKai", "LXGW WenKai Screen", -apple-system, sans-serif', desc: '楷体风，需已安装' },
+  { key: 'mono',    name: '等宽', css: '"SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace', desc: '程序员风，密码区不变' },
+  { key: 'serif',   name: '宋体/衬线', css: '"Songti SC", "Source Han Serif SC", "Noto Serif CJK SC", "SimSun", serif', desc: '阅读向' },
+];
+
+function fontFamilyCss(key) {
+  const f = FONT_FAMILIES.find((x) => x.key === key);
+  return f ? f.css : FONT_FAMILIES[0].css;
+}
+
+function applyFont(persist = true) {
+  const scale = Math.min(FONT_SCALE_MAX, Math.max(FONT_SCALE_MIN, +prefs.fontScale || 100));
+  prefs.fontScale = scale;
+  const root = document.documentElement;
+  root.style.fontSize = (16 * scale / 100).toFixed(2) + 'px';
+  root.setAttribute('data-font', prefs.fontFamily || 'system');
+  if (persist) savePrefs();
+}
+
+function setFontScale(scale, persist = true) {
+  prefs.fontScale = Math.min(FONT_SCALE_MAX, Math.max(FONT_SCALE_MIN, Math.round(scale / FONT_SCALE_STEP) * FONT_SCALE_STEP));
+  applyFont(persist);
+}
+
+function stepFontScale(delta) {
+  setFontScale((+prefs.fontScale || 100) + delta);
+  toast('字号 ' + prefs.fontScale + '%' + (prefs.fontScale === 100 ? '' : '  ·  ⌘0 恢复'), 'ok', 1200);
+}
 
 /* ---------------- 基础工具 ---------------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -178,12 +220,12 @@ function avatarOf(text) {
 }
 
 let toastTimer;
-function toast(msg, kind = '') {
+function toast(msg, kind = '', duration = 2300) {
   const el = $('#toast');
   el.textContent = msg;
   el.className = 'toast show ' + kind;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.className = 'toast ' + kind; }, 2300);
+  toastTimer = setTimeout(() => { el.className = 'toast ' + kind; }, duration);
 }
 
 async function copyText(text, label = '已复制') {
@@ -226,6 +268,7 @@ function loadPrefs() {
     Object.assign(prefs, raw);
   } catch (_) {}
   applyTheme(prefs.theme, false);
+  applyFont(false);
 }
 
 function savePrefs() {
@@ -2804,7 +2847,30 @@ $('#menu-btn').addEventListener('click', async () => {
         </button>`).join('')}
     </div>
 
-    <div class="section-label">行为</div>
+    <div class="section-label">字体与大小</div>
+    <div class="font-row">
+      <div class="font-row-txt">
+        <div class="label">界面字号</div>
+        <div class="desc">⌘ + / ⌘ − 调整，⌘ 0 复位</div>
+      </div>
+      <div class="font-scale">
+        <button class="ghost-btn sm" id="font-minus" title="缩小">−</button>
+        <span class="font-scale-val" id="font-scale-val">${prefs.fontScale}%</span>
+        <button class="ghost-btn sm" id="font-plus" title="放大">＋</button>
+      </div>
+    </div>
+    <div class="font-presets" id="font-presets">
+      ${[85, 100, 110, 125, 140].map((v) =>
+        `<button class="font-preset ${+prefs.fontScale === v ? 'on' : ''}" data-fs="${v}">${v}%</button>`).join('')}
+    </div>
+    <div class="setting-row">
+      <div><div class="label">界面字体</div><div class="desc">未安装的字体会自动回退到系统默认</div></div>
+      <select id="font-family" class="font-select">
+        ${FONT_FAMILIES.map((f) =>
+          `<option value="${f.key}" ${prefs.fontFamily === f.key ? 'selected' : ''}>${f.name}</option>`).join('')}
+      </select>
+    </div>
+    <div class="font-sample" id="font-sample">Vault 字体预览 · Aa Bb 123 · 春眠不觉晓，处处闻啼鸟。</div>
     <div class="setting-row">
       <div><div class="label">自动锁定</div><div class="desc">无操作多久后自动上锁</div></div>
       ${seg('autolock', [[1, '1 分'], [5, '5 分'], [15, '15 分'], [30, '30 分'], [0, '关闭']])}
@@ -2894,6 +2960,31 @@ $('#menu-btn').addEventListener('click', async () => {
       $$('[data-theme-pick]', card).forEach((x) => x.classList.toggle('on', x === b));
     })
   );
+
+  /* 字体与大小 */
+  const paintFontUI = () => {
+    const val = $('#font-scale-val', card);
+    if (val) val.textContent = prefs.fontScale + '%';
+    $$('#font-presets [data-fs]', card).forEach((x) => x.classList.toggle('on', +x.dataset.fs === +prefs.fontScale));
+  };
+  $('#font-minus').addEventListener('click', () => { stepFontScale(-FONT_SCALE_STEP); paintFontUI(); });
+  $('#font-plus').addEventListener('click', () => { stepFontScale(FONT_SCALE_STEP); paintFontUI(); });
+  $$('#font-presets [data-fs]', card).forEach((b) =>
+    b.addEventListener('click', () => { setFontScale(+b.dataset.fs); toast('字号 ' + prefs.fontScale + '%', 'ok', 1200); paintFontUI(); })
+  );
+  const fontSample = $('#font-sample', card);
+  const paintFontDesc = () => {
+    const f = FONT_FAMILIES.find((x) => x.key === prefs.fontFamily) || FONT_FAMILIES[0];
+    fontSample.title = f.desc;
+    fontSample.dataset.desc = f.desc;
+  };
+  paintFontDesc();
+  $('#font-family').addEventListener('change', (e) => {
+    prefs.fontFamily = e.target.value;
+    applyFont();
+    paintFontDesc();
+    toast('字体已切换', 'ok', 1200);
+  });
 
   $$('[data-pref]', card).forEach((b) =>
     b.addEventListener('click', () => {
@@ -3164,6 +3255,13 @@ $('#file-input').addEventListener('change', async (e) => {
 /* ---------------- 快捷键 ---------------- */
 window.addEventListener('keydown', (e) => {
   const mod = e.metaKey || e.ctrlKey;
+  /* 字号：⌘+ / ⌘- / ⌘0（浏览器默认的页面缩放对这个应用没意义，接管掉） */
+  if (mod && (e.key === '=' || e.key === '+' || e.key === '-' || e.key === '_' || e.key === '0')) {
+    e.preventDefault();
+    if (e.key === '0') { setFontScale(100); toast('字号已恢复 100%', 'ok', 1200); }
+    else stepFontScale(e.key === '=' || e.key === '+' ? FONT_SCALE_STEP : -FONT_SCALE_STEP);
+    return;
+  }
   if (mod && (e.key.toLowerCase() === 'k' || e.key.toLowerCase() === 'f')) {
     e.preventDefault();
     if (state.unlocked) $('#search').focus();
