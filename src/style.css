@@ -919,15 +919,15 @@ body.tag-dragging #folder-tree .nav-item.drop-ok {
 .backup-row button:hover { text-decoration: underline; }
 .backup-row button.danger { color: var(--danger); }
 .bk-main { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.backup-row .bk-when { color: var(--text); font-variant-numeric: tabular-nums; }
 .backup-row .bk-size { color: var(--faint); font-variant-numeric: tabular-nums; }
-.backup-row .bk-tag {
-  font-size: 0.6562rem; padding: 1px 5px; border-radius: 5px; color: var(--faint);
-  background: rgba(var(--tint), 0.07); white-space: nowrap;
+/* 小标签：备份行和同步记录行共用 */
+.bk-tag {
+  font-size: 0.6562rem; padding: 1px 6px; border-radius: 5px; color: var(--muted);
+  background: rgba(var(--tint), 0.11); border: 1px solid rgba(var(--tint), 0.14); white-space: nowrap; line-height: 1.5;
 }
-.backup-row .bk-tag.ok { color: var(--accent); background: rgba(var(--accent-rgb), 0.12); }
-.backup-row .bk-tag.warn { color: var(--warn); background: rgba(255, 176, 32, 0.13); }
-.bk-acts { display: flex; gap: 9px; align-items: center; flex: 0 0 auto; }
+.bk-tag.ok { color: var(--accent); background: rgba(var(--accent-rgb), 0.12); }
+.bk-tag.warn { color: var(--warn); background: rgba(255, 176, 32, 0.13); }
+.bk-when { color: var(--text); font-variant-numeric: tabular-nums; }.bk-acts { display: flex; gap: 9px; align-items: center; flex: 0 0 auto; }
 .bk-empty { color: var(--muted); font-size: 0.8125rem; padding: 8px 2px; }
 
 /* 备份位置配置 */
@@ -1019,8 +1019,11 @@ body.tag-dragging #folder-tree .nav-item.drop-ok {
 .sync-stat .ok { color: var(--ok); }
 .sync-stat .warn { color: var(--warn); }
 .sync-logs { display: flex; flex-direction: column; }
-.sync-log-row { display: grid; grid-template-columns: 4.6rem 2.6rem 2.4rem 1fr; gap: 8px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 0.75rem; }
+.sync-log-row { display: grid; grid-template-columns: 6.5rem 2.9rem 2.4rem 1fr; gap: 8px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 0.75rem; }
 .sync-log-row:last-child { border-bottom: none; }
+.sync-log-row .bk-when { white-space: nowrap; }
+.sync-log-row .bk-tag { justify-self: start; }
+.sync-log-row .ok, .sync-log-row .err { white-space: nowrap; }
 .sync-log-row .ok { color: var(--ok); }
 .sync-log-row .err { color: var(--danger); }
 

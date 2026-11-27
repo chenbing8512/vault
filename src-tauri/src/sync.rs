@@ -19,7 +19,7 @@ pub struct VersionInfo {
     pub exists: bool,
     pub version: u64,
     #[serde(default)]
-    pub updated_at: String,
+    pub updated_at: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

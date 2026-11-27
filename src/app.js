@@ -12,7 +12,7 @@ const ITERATIONS = 600000;
 const WEB_KEY = 'vault.envelope.v1';
 const PREFS_KEY = 'vault.prefs';
 const OLD_DAYS = 180;
-const APP_VERSION = '1.7.1';
+const APP_VERSION = '1.7.2';
 const DATA_VERSION = 4;
 const SYNC_VERSION_KEY = 'vault.syncVersion';
 const SYNC_SERVER = 'https://vault-sync.43.153.51.6.sslip.io/vault-sync';
@@ -3138,7 +3138,7 @@ function renderSetSync(pane) {
     <div class="section-label" style="margin-top:0">账号</div>
     ${s.token ? `
       <div class="setting-row">
-        <div><div class="label">${escapeHtml(s.user || '')}</div><div class="desc">已登录 · 服务端 ${escapeHtml(s.server)}</div></div>
+        <div><div class="label">${escapeHtml(s.user || '')}</div><div class="desc">已登录${s.auto ? ' · 自动同步已开启' : ' · 自动同步已关闭'}</div></div>
         <button class="ghost-btn sm danger" id="sync-logout">退出登录</button>
       </div>` : `
       <div class="sync-form">
@@ -3212,14 +3212,31 @@ async function loadSyncLogs(pane) {
   const el = $('#sync-logs', pane); if (!el) return;
   try {
     const r = await store.syncLogs();
-    el.innerHTML = r.list && r.list.length ? r.list.map((x) => `
+    const list = Array.isArray(r.list) ? r.list : [];
+    const ACT = { push: '推送', pull: '拉取', conflict: '冲突', register: '注册', login: '登录', logout: '退出' };
+    el.innerHTML = list.length ? list.map((x) => `
       <div class="sync-log-row">
-        <span class="bk-when">${fmtTime(x.createdAt)}</span>
-        <span class="bk-tag">${{ push: '推送', pull: '拉取', conflict: '冲突', register: '注册', login: '登录' }[x.action] || escapeHtml(x.action)}</span>
+        <span class="bk-when">${fmtSyncTime(x.createdAt)}</span>
+        <span class="bk-tag">${ACT[x.action] || escapeHtml(x.action || '-')}</span>
         <span class="${x.result === 'ok' ? 'ok' : 'err'}">${x.result === 'ok' ? '成功' : '拒绝'}</span>
         <span class="desc ellipsis">${escapeHtml(x.detail || '')}${x.clientName ? ' · ' + escapeHtml(x.clientName) : ''}</span>
       </div>`).join('') : '<div class="bk-empty">还没有同步记录</div>';
   } catch (e) { el.innerHTML = `<div class="bk-empty">${escapeHtml(String(e.message || e))}</div>`; }
+}
+
+/* 服务端 LocalDateTime 是无时区的 "2026-11-27T15:03:26"（北京时间），Safari/WebKit 对 "T" 直接 new Date 会得到 Invalid Date，手动拆 */
+function fmtSyncTime(s) {
+  if (!s || typeof s !== 'string') return '-';
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (!m) return escapeHtml(s);
+  const [, y, mo, d, h, mi] = m;
+  const now = new Date();
+  const sameDay = +y === now.getFullYear() && +mo === now.getMonth() + 1 && +d === now.getDate();
+  const sameYear = +y === now.getFullYear();
+  const hm = `${h}:${mi}`;
+  if (sameDay) return hm;
+  const md = `${+mo}月${+d}日`;
+  return sameYear ? `${md} ${hm}` : `${y}-${mo}-${d} ${hm}`;
 }
 
 /* ---------- 备份 ---------- */
