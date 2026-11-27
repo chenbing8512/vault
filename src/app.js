@@ -12,7 +12,7 @@ const ITERATIONS = 600000;
 const WEB_KEY = 'vault.envelope.v1';
 const PREFS_KEY = 'vault.prefs';
 const OLD_DAYS = 180;
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.7.1';
 const DATA_VERSION = 4;
 const SYNC_VERSION_KEY = 'vault.syncVersion';
 const SYNC_SERVER = 'https://vault-sync.43.153.51.6.sslip.io/vault-sync';
@@ -292,7 +292,6 @@ function applyTheme(key, persist = true) {
 function closeModal() {
   $('#modal').classList.add('hidden');
   $('#modal-card').classList.remove('wide');
-  $('#modal-card').classList.remove('settings');
   if (returnToSettings) { returnToSettings = false; setTimeout(() => { if (state.unlocked) openSettings(); }, 0); }
 }
 
@@ -2980,44 +2979,42 @@ let settingsSection = 'appearance';
 
 function openSettings(section) {
   settingsSection = section || settingsSection || 'appearance';
-  const card = $('#modal-card');
-  card.classList.add('wide');
-  card.classList.add('settings');
   renderSettings();
 }
 
 function closeSettings() {
-  const card = $('#modal-card');
-  card.classList.remove('settings');
-  closeModal();
+  $('#settings-view').classList.add('hidden');
+  resetAutoLock();
 }
 
 function renderSettings() {
-  const card = $('#modal-card');
-  const syncOn = !!(prefs.sync && prefs.sync.enabled);
+  const view = $('#settings-view');
   const hasToken = !!(prefs.sync && prefs.sync.token);
-  card.innerHTML = `
+  const syncAuto = !!(prefs.sync && prefs.sync.auto);
+  view.innerHTML = `
     <div class="settings-shell">
-      <div class="settings-head">
-        <button class="icon-btn settings-back" id="set-back" title="返回">${ICON_BACK}</button>
+      <header class="settings-head">
+        <button class="icon-btn settings-back" id="set-back" title="返回主界面">${ICON_BACK}</button>
         <h3>设置</h3>
-      </div>
+        <span class="settings-ver">v${APP_VERSION}</span>
+      </header>
       <div class="settings-body">
         <nav class="settings-nav">
           ${SET_SECTIONS.map((s) => `
             <button class="settings-nav-item ${settingsSection === s.key ? 'on' : ''}" data-sec="${s.key}">
               <span class="nm">${s.name}</span>
-              <span class="ds">${s.key === 'sync' ? (hasToken ? (syncOn ? '已登录 · 自动' : '已登录 · 手动') : '未登录') : s.desc}</span>
+              <span class="ds">${s.key === 'sync' ? (hasToken ? (syncAuto ? '已登录 · 自动' : '已登录 · 手动') : '未登录') : s.desc}</span>
             </button>`).join('')}
         </nav>
         <div class="settings-pane" id="settings-pane"></div>
       </div>
     </div>`;
-  $('#modal').classList.remove('hidden');
+  view.classList.remove('hidden');
   $('#set-back').addEventListener('click', closeSettings);
-  $$('[data-sec]', card).forEach((b) =>
+  $$('[data-sec]', view).forEach((b) =>
     b.addEventListener('click', () => { settingsSection = b.dataset.sec; renderSettings(); })
   );
+  view.onkeydown = (e) => { if (e.key === 'Escape') closeSettings(); };
   const pane = $('#settings-pane');
   ({ appearance: renderSetAppearance, behavior: renderSetBehavior, sync: renderSetSync,
      backup: renderSetBackup, data: renderSetData, about: renderSetAbout })[settingsSection](pane);
@@ -3167,7 +3164,6 @@ function renderSetSync(pane) {
 
     <div class="section-label">最近同步记录</div>
     <div class="sync-logs" id="sync-logs"><div class="bk-empty">加载中…</div></div>`;
-  $('#modal').classList.remove('hidden');
 
   if (s.token) {
     $('#sync-logout', pane).addEventListener('click', async () => {
@@ -3413,9 +3409,10 @@ async function checkForUpdate(manual = false) {
   const paint = (t) => { if (hint) hint.textContent = t; };
   if (manual) paint('正在检查…');
   try {
-    const { check } = window.__TAURI__.updater;
-    const update = await check();
-    if (!update.available) {
+    const upd = window.__TAURI__.updater || window.__TAURI_PLUGIN_UPDATER__;
+    if (!upd) throw new Error('updater 插件未加载');
+    const update = await upd.check();   // 无更新时返回 null
+    if (!update) {
       paint('已是最新版本（' + APP_VERSION + '）');
       if (manual) toast('已是最新版本', 'ok', 1500);
       return;
@@ -3457,7 +3454,7 @@ async function installUpdate(update) {
         if (ev.data.total) { const pct = Math.round(ev.data.chunkLength / ev.data.total * 100); toast('下载中… ' + pct + '%', '', 60000); }
       } else if (ev.event === 'Finished') toast('下载完成，正在安装…', 'ok', 60000);
     });
-    await window.__TAURI__.process.restart();
+    await (window.__TAURI__.process || window.__TAURI_PLUGIN_PROCESS__).restart();
   } catch (e) {
     toast('更新失败：' + (e.message || e), 'err', 4000);
   }

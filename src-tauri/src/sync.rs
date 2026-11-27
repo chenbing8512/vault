@@ -32,8 +32,6 @@ pub struct PullResult {
 #[derive(Deserialize, Debug)]
 struct PushResp {
     version: u64,
-    #[serde(default)]
-    code: i64,
 }
 
 #[derive(Deserialize, Debug)]

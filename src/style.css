@@ -985,28 +985,33 @@ body.tag-dragging #folder-tree .nav-item.drop-ok {
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes pop { from { opacity: 0; transform: scale(0.96) translateY(6px); } to { opacity: 1; transform: none; } }
 
-/* ---------------- 设置：分类分页 ---------------- */
-.modal-card.settings { width: 640px; padding: 0; overflow: hidden; display: flex; flex-direction: column; max-height: 86vh; }
-.settings-shell { display: flex; flex-direction: column; min-height: 0; height: 100%; }
-.settings-head { display: flex; align-items: center; gap: 10px; padding: 16px 22px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-.settings-head h3 { margin: 0; font-size: 0.9688rem; font-weight: 600; }
-.settings-back { width: 28px; height: 28px; }
-.settings-back svg { width: 15px; height: 15px; }
-.settings-body { display: grid; grid-template-columns: 148px 1fr; flex: 1; min-height: 0; }
-.settings-nav { border-right: 1px solid var(--border); padding: 12px 10px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 0; }
-.settings-nav-item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px 12px; border-radius: 9px; text-align: left; color: var(--muted); }
+/* ---------------- 设置：全屏分类页 ---------------- */
+.settings-view { position: fixed; inset: 0; z-index: 50; background: var(--bg); animation: fade 0.25s ease; }
+.settings-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.settings-head { display: flex; align-items: center; gap: 12px; padding: 14px 28px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.settings-head h3 { margin: 0; font-size: 1rem; font-weight: 600; }
+.settings-ver { font-size: 0.75rem; color: var(--faint); margin-left: 2px; }
+.settings-back { width: 30px; height: 30px; }
+.settings-back svg { width: 16px; height: 16px; }
+.settings-body { display: grid; grid-template-columns: 200px minmax(0, 1fr); flex: 1; min-height: 0; }
+.settings-nav { border-right: 1px solid var(--border); padding: 14px 12px; display: flex; flex-direction: column; gap: 3px; overflow-y: auto; min-height: 0; }
+.settings-nav-item { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; padding: 9px 14px; border-radius: 10px; text-align: left; color: var(--muted); }
 .settings-nav-item:hover { background: rgba(var(--tint), 0.06); color: var(--text); }
 .settings-nav-item.on { background: rgba(var(--accent-rgb), 0.12); color: var(--text); }
-.settings-nav-item .nm { font-size: 0.875rem; font-weight: 500; }
+.settings-nav-item .nm { font-size: 0.9375rem; font-weight: 500; }
 .settings-nav-item .ds { font-size: 0.6875rem; color: var(--faint); }
 .settings-nav-item.on .ds { color: var(--muted); }
-.settings-pane { padding: 18px 22px 22px; overflow-y: auto; min-height: 0; }
+.settings-pane { padding: 24px 0 24px 32px; overflow-y: auto; min-height: 0; }
+.settings-pane > * { max-width: 720px; }
 .settings-pane .section-label:first-child { margin-top: 0; }
+.settings-pane .setting-row { padding-top: 12px; padding-bottom: 12px; }
 
 /* 同步 */
-.sync-form { display: flex; flex-direction: column; gap: 10px; margin-bottom: 6px; }
+.sync-form { display: flex; flex-direction: column; gap: 10px; margin-bottom: 6px; max-width: 26.25rem; }
+.sync-form .field { margin-bottom: 0; }
 .sync-form-acts { display: flex; gap: 8px; margin-top: 4px; }
-.sync-form-acts .primary { padding: 0 18px; height: 2.0625rem; font-size: 0.8125rem; }
+.sync-form-acts .primary { flex: 1; width: auto; margin-top: 0; padding: 0 18px; height: 2.0625rem; font-size: 0.8125rem; white-space: nowrap; }
+.sync-form-acts .ghost-btn { flex-shrink: 0; white-space: nowrap; }
 .sync-hint { font-size: 0.75rem; color: var(--faint); line-height: 1.6; margin: 6px 0 0; }
 .sync-hint b { color: var(--text); font-weight: 500; }
 .sync-status { margin-top: 6px; }
