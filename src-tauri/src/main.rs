@@ -383,60 +383,40 @@ fn save_vault(data: String, state: State<'_, AppState>) -> Result<(), String> {
 }
 
 /* ---------------- 云端同步 ---------------- */
-static SYNC_RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+/* 所有网络命令都是 async fn：Tauri 会把它们放到自己的异步运行时上执行，不占主线程。
+   之前是同步命令 + rx.recv() 阻塞等待，而同步命令跑在主线程上 —— 每次请求都把整个 UI 卡死几秒。 */
 
-fn sync_runtime() -> Result<tokio::runtime::Handle, String> {
-    if SYNC_RT.get().is_none() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .thread_name("vault-sync")
-            .enable_all()
-            .build()
-            .map_err(|e| format!("初始化异步运行时失败：{e}"))?;
-        let _ = SYNC_RT.set(rt);
-    }
-    Ok(SYNC_RT.get().expect("sync runtime").handle().clone())
-}
-
-/// 在运行时线程上执行 future，当前线程阻塞等待结果（Tauri 命令是同步的）
-fn run_sync<F>(f: F) -> Result<F::Output, String>
-where
-    F: std::future::Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    let h = sync_runtime()?;
-    let (tx, rx) = std::sync::mpsc::channel::<F::Output>();
-    h.spawn(async move {
-        let _ = tx.send(f.await);
-    });
-    rx.recv().map_err(|_| "同步任务异常终止".to_string())
+#[tauri::command]
+async fn sync_login(server: String, username: String, password: String, register: bool) -> Result<sync::SyncAccount, String> {
+    sync::login(server, username, password, register).await
 }
 
 #[tauri::command]
-fn sync_login(server: String, username: String, password: String, register: bool) -> Result<sync::SyncAccount, String> {
-    run_sync(sync::login(server, username, password, register))?
-}
-
-#[tauri::command]
-fn sync_version(server: String, token: String) -> Result<sync::VersionInfo, String> {
+async fn sync_version(server: String, token: String) -> Result<sync::VersionInfo, String> {
     let acct = sync::SyncAccount { server, token, user: String::new() };
-    run_sync(sync::version(acct))?
+    sync::version(acct).await
 }
 
 #[tauri::command]
-fn sync_push(server: String, token: String, base_version: u64, state: State<'_, AppState>) -> Result<u64, String> {
+async fn sync_push(server: String, token: String, base_version: u64, state: State<'_, AppState>) -> Result<u64, String> {
     let acct = sync::SyncAccount { server, token, user: String::new() };
     // 推送当前磁盘上的 Envelope（密文）。先确保 pending 的写入已落盘由前端保证。
-    let raw = std::fs::read_to_string(&state.vault_path).map_err(|e| format!("读取数据文件失败：{e}"))?;
-    let env: Envelope = serde_json::from_str(&raw).map_err(|_| "数据文件格式不正确".to_string())?;
-    let blob = serde_json::to_string(&env).map_err(|e| e.to_string())?;
-    run_sync(sync::push(acct, blob, base_version))?
+    // 磁盘 IO 放到阻塞线程池，别在异步线程上读文件
+    let path = state.vault_path.clone();
+    let blob = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let raw = std::fs::read_to_string(&path).map_err(|e| format!("读取数据文件失败：{e}"))?;
+        let env: Envelope = serde_json::from_str(&raw).map_err(|_| "数据文件格式不正确".to_string())?;
+        serde_json::to_string(&env).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("读取任务异常：{e}"))??;
+    sync::push(acct, blob, base_version).await
 }
 
 #[tauri::command]
-fn sync_pull(server: String, token: String) -> Result<sync::PullResult, String> {
+async fn sync_pull(server: String, token: String) -> Result<sync::PullResult, String> {
     let acct = sync::SyncAccount { server, token, user: String::new() };
-    run_sync(sync::pull(acct))?
+    sync::pull(acct).await
 }
 
 /// 用当前密钥解密远端 blob，返回明文 JSON 供前端合并。解不开 → Err（通常是主密码不一致）。
@@ -450,9 +430,9 @@ fn sync_decrypt_blob(blob: String, state: State<'_, AppState>) -> Result<String,
 }
 
 #[tauri::command]
-fn sync_logs(server: String, token: String, limit: u32) -> Result<serde_json::Value, String> {
+async fn sync_logs(server: String, token: String, limit: u32) -> Result<serde_json::Value, String> {
     let acct = sync::SyncAccount { server, token, user: String::new() };
-    run_sync(sync::logs(acct, limit))?
+    sync::logs(acct, limit).await
 }
 
 #[tauri::command]

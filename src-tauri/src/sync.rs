@@ -53,13 +53,20 @@ struct UserInfo {
     username: String,
 }
 
-fn client() -> Result<Client, String> {
-    Client::builder()
-        .timeout(Duration::from_secs(25))
-        .connect_timeout(Duration::from_secs(10))
-        .user_agent(concat!("Vault/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| format!("HTTP 客户端初始化失败：{e}"))
+/// 全局复用一个 Client：带连接池和 keep-alive，连续请求不用每次重新 TLS 握手。
+/// 之前每次请求都 Client::builder() 新建，切一次同步 tab 发 2 个请求就是 2 次完整握手。
+fn client() -> Result<&'static Client, String> {
+    static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        Client::builder()
+            .timeout(Duration::from_secs(25))
+            .connect_timeout(Duration::from_secs(10))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .user_agent(concat!("Vault/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("HTTP 客户端初始化")
+    });
+    Ok(CLIENT.get().expect("http client"))
 }
 
 fn base(server: &str) -> String {

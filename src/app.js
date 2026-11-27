@@ -12,12 +12,13 @@ const ITERATIONS = 600000;
 const WEB_KEY = 'vault.envelope.v1';
 const PREFS_KEY = 'vault.prefs';
 const OLD_DAYS = 180;
-const APP_VERSION = '1.7.2';
+const APP_VERSION = '1.7.3';
 const DATA_VERSION = 4;
 const SYNC_VERSION_KEY = 'vault.syncVersion';
 const SYNC_SERVER = 'https://vault-sync.43.153.51.6.sslip.io/vault-sync';
 const LOGO_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10.5" width="16" height="10.5" rx="2.6" /><path d="M8 10.5V7.2a4 4 0 0 1 8 0v3.3" /><circle cx="12" cy="15.8" r="1.35" fill="currentColor" stroke="none" /></svg>';
 let returnToSettings = false;
+const syncCache = { at: 0, version: null, logs: null };   // 同步 tab 的 30s 缓存
 
 /* ---------------- 常量 ---------------- */
 const TYPES = [
@@ -605,7 +606,11 @@ async function doSync(manual = false) {
     return false;
   } finally {
     syncBusy = false;
-    const st = $('#sync-status'); if (st && st.isConnected) refreshSyncStatus($('#settings-pane'));
+    syncCache.at = 0;   // 同步过了，缓存作废
+    const pane = $('#settings-pane');
+    if (pane && $('#sync-status', pane) && $('#sync-logs', pane)) {
+      refreshSyncStatus(pane); loadSyncLogs(pane);
+    }
   }
 }
 
@@ -3169,15 +3174,21 @@ function renderSetSync(pane) {
     $('#sync-logout', pane).addEventListener('click', async () => {
       const ok = await confirmDialog({ title: '退出同步账号？', desc: '本地数据不受影响，只是不再同步。', okText: '退出' });
       if (!ok) return;
-      prefs.sync.token = ''; prefs.sync.user = ''; savePrefs(); renderSettings();
+      prefs.sync.token = ''; prefs.sync.user = ''; savePrefs();
+      syncCache.at = 0; syncCache.version = null; syncCache.logs = null;
+      renderSettings();
     });
     $('#sync-now', pane).addEventListener('click', () => doSync(true));
     $('#sync-auto', pane).addEventListener('change', (e) => {
       prefs.sync.auto = e.target.checked; savePrefs();
       toast(e.target.checked ? '自动同步已开启' : '自动同步已关闭', 'ok', 1200);
     });
-    refreshSyncStatus(pane);
-    loadSyncLogs(pane);
+    // 30s 内切回来不重新请求（之前每切一次 tab 就发 2 个 HTTPS 请求）
+    const fresh = syncCache.at && Date.now() - syncCache.at < 30000;
+    if (fresh && syncCache.version) paintSyncVersion(pane, syncCache.version);
+    else refreshSyncStatus(pane);
+    if (fresh && syncCache.logs) paintSyncLogs(pane, syncCache.logs);
+    else loadSyncLogs(pane);
   } else {
     const submit = async (register) => {
       const u = $('#sync-user', pane).value.trim(), p = $('#sync-pass', pane).value;
@@ -3187,6 +3198,7 @@ function renderSetSync(pane) {
       try {
         const r = await store.syncLogin(u, p, register);
         prefs.sync.token = r.token; prefs.sync.user = r.user; prefs.sync.server = r.server; savePrefs();
+        syncCache.at = 0; syncCache.version = null; syncCache.logs = null;
         toast(register ? '注册成功，已登录' : '登录成功', 'ok');
         renderSettings();
       } catch (e) { toast(String(e.message || e), 'err'); }
@@ -3198,22 +3210,29 @@ function renderSetSync(pane) {
   }
 }
 
+function paintSyncVersion(pane, v) {
+  const el = $('#sync-status', pane); if (!el) return;
+  const localV = +(localStorage.getItem('vault.syncVersion') || 0);
+  el.innerHTML = `<div class="sync-stat"><span>云端 ${v.exists ? 'v' + v.version : '空'}</span><span>本地已知 v${localV}</span><span class="${v.version > localV ? 'warn' : 'ok'}">${!v.exists ? '尚未上传' : v.version > localV ? '云端有新版本' : '已是最新'}</span></div>`;
+}
+
 async function refreshSyncStatus(pane) {
   const el = $('#sync-status', pane); if (!el) return;
   el.innerHTML = '<div class="desc">检查云端…</div>';
   try {
     const v = await store.syncVersion();
-    const localV = +(localStorage.getItem('vault.syncVersion') || 0);
-    el.innerHTML = `<div class="sync-stat"><span>云端 ${v.exists ? 'v' + v.version : '空'}</span><span>本地已知 v${localV}</span><span class="${v.version > localV ? 'warn' : 'ok'}">${!v.exists ? '尚未上传' : v.version > localV ? '云端有新版本' : '已是最新'}</span></div>`;
-  } catch (e) { el.innerHTML = `<div class="desc" style="color:var(--danger)">${escapeHtml(String(e.message || e))}</div>`; }
+    if (!$('#sync-status', pane)) return;   // 用户已切走
+    syncCache.version = v; syncCache.at = Date.now();
+    paintSyncVersion(pane, v);
+  } catch (e) {
+    if ($('#sync-status', pane)) el.innerHTML = `<div class="desc" style="color:var(--danger)">${escapeHtml(String(e.message || e))}</div>`;
+  }
 }
 
-async function loadSyncLogs(pane) {
+function paintSyncLogs(pane, r) {
   const el = $('#sync-logs', pane); if (!el) return;
-  try {
-    const r = await store.syncLogs();
-    const list = Array.isArray(r.list) ? r.list : [];
-    const ACT = { push: '推送', pull: '拉取', conflict: '冲突', register: '注册', login: '登录', logout: '退出' };
+  const list = Array.isArray(r.list) ? r.list : [];
+  const ACT = { push: '推送', pull: '拉取', conflict: '冲突', register: '注册', login: '登录', logout: '退出' };
     el.innerHTML = list.length ? list.map((x) => `
       <div class="sync-log-row">
         <span class="bk-when">${fmtSyncTime(x.createdAt)}</span>
@@ -3221,7 +3240,18 @@ async function loadSyncLogs(pane) {
         <span class="${x.result === 'ok' ? 'ok' : 'err'}">${x.result === 'ok' ? '成功' : '拒绝'}</span>
         <span class="desc ellipsis">${escapeHtml(x.detail || '')}${x.clientName ? ' · ' + escapeHtml(x.clientName) : ''}</span>
       </div>`).join('') : '<div class="bk-empty">还没有同步记录</div>';
-  } catch (e) { el.innerHTML = `<div class="bk-empty">${escapeHtml(String(e.message || e))}</div>`; }
+}
+
+async function loadSyncLogs(pane) {
+  const el = $('#sync-logs', pane); if (!el) return;
+  try {
+    const r = await store.syncLogs();
+    if (!$('#sync-logs', pane)) return;   // 用户已切走
+    syncCache.logs = r; syncCache.at = Date.now();
+    paintSyncLogs(pane, r);
+  } catch (e) {
+    if ($('#sync-logs', pane)) el.innerHTML = `<div class="bk-empty">${escapeHtml(String(e.message || e))}</div>`;
+  }
 }
 
 /* 服务端 LocalDateTime 是无时区的 "2026-11-27T15:03:26"（北京时间），Safari/WebKit 对 "T" 直接 new Date 会得到 Invalid Date，手动拆 */
