@@ -12,6 +12,12 @@ const ITERATIONS = 600000;
 const WEB_KEY = 'vault.envelope.v1';
 const PREFS_KEY = 'vault.prefs';
 const OLD_DAYS = 180;
+const APP_VERSION = '1.7.0';
+const DATA_VERSION = 4;
+const SYNC_VERSION_KEY = 'vault.syncVersion';
+const SYNC_SERVER = 'https://vault-sync.43.153.51.6.sslip.io/vault-sync';
+const LOGO_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10.5" width="16" height="10.5" rx="2.6" /><path d="M8 10.5V7.2a4 4 0 0 1 8 0v3.3" /><circle cx="12" cy="15.8" r="1.35" fill="currentColor" stroke="none" /></svg>';
+let returnToSettings = false;
 
 /* ---------------- 常量 ---------------- */
 const TYPES = [
@@ -286,6 +292,8 @@ function applyTheme(key, persist = true) {
 function closeModal() {
   $('#modal').classList.add('hidden');
   $('#modal-card').classList.remove('wide');
+  $('#modal-card').classList.remove('settings');
+  if (returnToSettings) { returnToSettings = false; setTimeout(() => { if (state.unlocked) openSettings(); }, 0); }
 }
 
 function confirmDialog({ title, desc, okText = '确认', danger = false }) {
@@ -472,7 +480,144 @@ const store = {
     downloadBlob(content, filename);
     return '已下载到浏览器下载目录';
   },
+  /* ---------- 云端同步 ---------- */
+  _syncAcct() {
+    const s = prefs.sync || {};
+    return { server: s.server || '', token: s.token || '' };
+  },
+  async syncLogin(username, password, register) {
+    if (!IS_DESKTOP) throw new Error('浏览器模式不支持同步');
+    const s = prefs.sync || {};
+    return invoke('sync_login', { server: s.server || '', username, password, register: !!register });
+  },
+  async syncVersion() { const a = this._syncAcct(); return invoke('sync_version', a); },
+  async syncPush(baseVersion) { const a = this._syncAcct(); return invoke('sync_push', { ...a, baseVersion }); },
+  async syncPull() { const a = this._syncAcct(); return invoke('sync_pull', a); },
+  async syncDecryptBlob(blob) { return invoke('sync_decrypt_blob', { blob }); },
+  async syncLogs() { const a = this._syncAcct(); return invoke('sync_logs', { ...a, limit: 20 }); },
 };
+
+/* ---------------- 同步逻辑 ---------------- */
+let syncBusy = false;
+
+function syncLocalVersion() { return +(localStorage.getItem(SYNC_VERSION_KEY) || 0); }
+function setSyncLocalVersion(v) { localStorage.setItem(SYNC_VERSION_KEY, String(v)); }
+
+function rerenderAll() { renderNav(); renderFilters(); renderList(); const cur = state.selectedId; if (cur && state.items.some((i) => i.id === cur && !i.deletedAt)) selectItem(cur); else renderDetail(); }
+
+/** 条目级合并：两边都有按 updatedAt 取新；删除用 deletedAt 时间戳比较。 */
+function mergeVault(localRaw, remoteRaw) {
+  const L = localRaw || {}, R = remoteRaw || {};
+  const byId = (arr) => { const m = new Map(); (arr || []).forEach((x) => x && x.id != null && m.set(String(x.id), x)); return m; };
+  const stamp = (x) => Math.max(+(x.updatedAt) || 0, +(x.deletedAt) || 0, +(x.createdAt) || 0);
+  const mergeArr = (a, b) => {
+    const A = byId(a), B = byId(b);
+    const out = new Map(A);
+    B.forEach((id, rb) => {
+      const la = out.get(id);
+      if (!la) { out.set(id, rb); return; }
+      // 远端删除晚于本地修改 → 取删除；反之保留本地
+      if (rb.deletedAt && !la.deletedAt && +(rb.deletedAt) > +(la.updatedAt || 0)) { out.set(id, rb); return; }
+      if (la.deletedAt && !rb.deletedAt && +(la.deletedAt) > +(rb.updatedAt || 0)) return;
+      out.set(id, stamp(rb) > stamp(la) ? rb : la);
+    });
+    return Array.from(out.values());
+  };
+  // 文件夹被删：任一边没有即为删除（文件夹没有 deletedAt）
+  const lf = byId(L.folders), rf = byId(R.folders);
+  const folders = Array.from(lf.keys()).filter((id) => rf.has(id)).map((id) => (+((rf.get(id).updatedAt) || 0) > +(lf.get(id).updatedAt || 0) ? rf.get(id) : lf.get(id)));
+  const tags = (() => {
+    const m = new Map();
+    [...(L.tags || []), ...(R.tags || [])].forEach((t) => { if (t && t.name && !m.has(t.name)) m.set(t.name, t); });
+    return Array.from(m.values());
+  })();
+  return {
+    version: 4,
+    items: mergeArr(L.items, R.items),
+    vaults: mergeArr(L.vaults, R.vaults),
+    folders,
+    tags,
+    curVaultId: (R.curVaultId && (R.vaults || []).some((v) => v.id === R.curVaultId)) ? R.curVaultId : L.curVaultId,
+    settings: {},
+  };
+}
+
+/**
+ * 同步主流程：
+ *  1. 查云端版本
+ *  2. 云端更新 → 拉取、解密、合并、落盘
+ *  3. 本地有变化或合并后 → 推送
+ *  4. 推送遇 409 → 重新拉取合并再推一次
+ */
+async function doSync(manual = false) {
+  const s = prefs.sync || {};
+  if (!s.token || syncBusy) return false;
+  syncBusy = true;
+  const label = manual ? '' : 'auto';
+  try {
+    if (manual) toast('正在同步…', '', 600);
+    const remote = await store.syncVersion();
+    const localV = syncLocalVersion();
+    let merged = false;
+
+    if (remote.exists && remote.version !== localV) {
+      const pull = await store.syncPull();
+      let remoteRaw;
+      try { remoteRaw = JSON.parse(await store.syncDecryptBlob(pull.blob)); }
+      catch (e) { throw new Error('云端数据无法用当前主密码解密。请确认两台设备使用同一主密码，或先在原设备修改为一致。'); }
+      const localRaw = JSON.parse(serialize());
+      const mergedRaw = mergeVault(localRaw, remoteRaw);
+      const changed = JSON.stringify(mergedRaw.items) !== JSON.stringify(localRaw.items)
+        || JSON.stringify(mergedRaw.folders) !== JSON.stringify(localRaw.folders)
+        || JSON.stringify(mergedRaw.tags) !== JSON.stringify(localRaw.tags);
+      if (changed) { loadData(mergedRaw); rerenderAll(); await persist(true); merged = true; }
+      setSyncLocalVersion(remote.version);
+    }
+
+    // 本地 dirty 或刚合并过 → 推送；手动同步总是推送一次（保证云端有最新）
+    const needPush = manual || merged || state.dirty || !remote.exists || (remote.version === localV && localV === 0);
+    if (needPush) {
+      await persist(true);
+      const base = remote.exists ? remote.version : 0;
+      try {
+        const nv = await store.syncPush(base);
+        setSyncLocalVersion(nv);
+        if (manual) toast(merged ? '已合并并同步（云端 v' + nv + '）' : '已上传到云端（v' + nv + '）', 'ok', 1800);
+      } catch (e) {
+        if (String(e.message || e).startsWith('CONFLICT')) {
+          // 409：再拉一次合并后重推
+          const p2 = await store.syncPull();
+          const r2 = JSON.parse(await store.syncDecryptBlob(p2.blob));
+          const m2 = mergeVault(JSON.parse(serialize()), r2);
+          loadData(m2); rerenderAll(); await persist(true);
+          const nv = await store.syncPush(p2.version);
+          setSyncLocalVersion(nv);
+          if (manual) toast('云端有变化，已合并（v' + nv + '）', 'ok', 1800);
+        } else throw e;
+      }
+    } else if (manual) {
+      toast('已是最新（v' + remote.version + '）', 'ok', 1500);
+    }
+    return true;
+  } catch (e) {
+    const msg = String(e.message || e);
+    if (manual) toast('同步失败：' + msg, 'err', 4000);
+    else console.warn('[sync]', msg);
+    return false;
+  } finally {
+    syncBusy = false;
+    const st = $('#sync-status'); if (st && st.isConnected) refreshSyncStatus($('#settings-pane'));
+  }
+}
+
+/** 自动同步入口：解锁后 + 每次保存后（延迟 3s 合并连续保存） */
+let autoSyncTimer = null;
+function scheduleAutoSync(delay = 3000) {
+  const s = prefs.sync || {};
+  if (!s.token || !s.auto || !IS_DESKTOP) return;
+  clearTimeout(autoSyncTimer);
+  autoSyncTimer = setTimeout(() => doSync(false), delay);
+}
 
 function downloadBlob(text, filename) {
   const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
@@ -503,6 +648,7 @@ function persist(immediate = false) {
     try {
       await store.save(serialize());
       state.dirty = false;
+      scheduleAutoSync();
     } catch (e) {
       toast('保存失败：' + (e.message || e), 'err');
     }
@@ -837,6 +983,8 @@ function enterApp() {
   if (first) selectItem(first.id);
   else renderDetail();
   resetAutoLock();
+  scheduleAutoSync(1200);
+  scheduleUpdateCheck();
 }
 
 /* 回收站里超过保留期的条目自动清理 */
@@ -2819,21 +2967,83 @@ function openGenerator(onUse) {
 }
 
 /* ---------------- 设置 ---------------- */
-$('#menu-btn').addEventListener('click', async () => {
+/* 分类分页：左侧菜单 + 右侧内容，顶部「← 返回」回主界面。 */
+const SET_SECTIONS = [
+  { key: 'appearance', name: '外观', desc: '主题、字号、字体' },
+  { key: 'behavior',   name: '行为', desc: '锁定、剪贴板、回收站' },
+  { key: 'sync',       name: '同步', desc: '多台设备保持一致' },
+  { key: 'backup',     name: '备份', desc: '本地自动备份' },
+  { key: 'data',       name: '数据', desc: '主密码、导入导出' },
+  { key: 'about',      name: '关于', desc: '版本与更新' },
+];
+let settingsSection = 'appearance';
+
+function openSettings(section) {
+  settingsSection = section || settingsSection || 'appearance';
   const card = $('#modal-card');
   card.classList.add('wide');
-  let backups = [];
-  let bkCfg = { primary: '', extra: null };
-  try { backups = await store.listBackups(); } catch (_) {}
-  try { bkCfg = await store.backupConfig(); } catch (_) {}
+  card.classList.add('settings');
+  renderSettings();
+}
 
-  const seg = (key, opts) => `<div class="seg">${opts.map(([v, label]) =>
-    `<button data-pref="${key}" data-v="${v}" class="${prefs[key] === v ? 'on' : ''}">${label}</button>`).join('')}</div>`;
+function closeSettings() {
+  const card = $('#modal-card');
+  card.classList.remove('settings');
+  closeModal();
+}
 
+function renderSettings() {
+  const card = $('#modal-card');
+  const syncOn = !!(prefs.sync && prefs.sync.enabled);
+  const hasToken = !!(prefs.sync && prefs.sync.token);
   card.innerHTML = `
-    <h3>设置</h3>
-    <p class="modal-sub">数据文件：${escapeHtml(state.meta.path || '-')}</p>
+    <div class="settings-shell">
+      <div class="settings-head">
+        <button class="icon-btn settings-back" id="set-back" title="返回">${ICON_BACK}</button>
+        <h3>设置</h3>
+      </div>
+      <div class="settings-body">
+        <nav class="settings-nav">
+          ${SET_SECTIONS.map((s) => `
+            <button class="settings-nav-item ${settingsSection === s.key ? 'on' : ''}" data-sec="${s.key}">
+              <span class="nm">${s.name}</span>
+              <span class="ds">${s.key === 'sync' ? (hasToken ? (syncOn ? '已登录 · 自动' : '已登录 · 手动') : '未登录') : s.desc}</span>
+            </button>`).join('')}
+        </nav>
+        <div class="settings-pane" id="settings-pane"></div>
+      </div>
+    </div>`;
+  $('#modal').classList.remove('hidden');
+  $('#set-back').addEventListener('click', closeSettings);
+  $$('[data-sec]', card).forEach((b) =>
+    b.addEventListener('click', () => { settingsSection = b.dataset.sec; renderSettings(); })
+  );
+  const pane = $('#settings-pane');
+  ({ appearance: renderSetAppearance, behavior: renderSetBehavior, sync: renderSetSync,
+     backup: renderSetBackup, data: renderSetData, about: renderSetAbout })[settingsSection](pane);
+}
 
+const ICON_BACK = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>';
+$('#menu-btn').addEventListener('click', () => openSettings());
+
+const seg = (key, opts) => `<div class="seg">${opts.map(([v, label]) =>
+  `<button data-pref="${key}" data-v="${v}" class="${+prefs[key] === +v ? 'on' : ''}">${label}</button>`).join('')}</div>`;
+
+function bindSeg(pane) {
+  $$('[data-pref]', pane).forEach((b) =>
+    b.addEventListener('click', () => {
+      const key = b.dataset.pref;
+      prefs[key] = +b.dataset.v;
+      savePrefs();
+      $$(`[data-pref="${key}"]`, pane).forEach((x) => x.classList.toggle('on', x === b));
+      if (key === 'autolock') { resetAutoLock(); toast('自动锁定已更新', 'ok', 1200); }
+    })
+  );
+}
+
+/* ---------- 外观 ---------- */
+function renderSetAppearance(pane) {
+  pane.innerHTML = `
     <div class="section-label" style="margin-top:0">界面风格</div>
     <div class="theme-grid">
       ${THEMES.map((t) => `
@@ -2870,7 +3080,38 @@ $('#menu-btn').addEventListener('click', async () => {
           `<option value="${f.key}" ${prefs.fontFamily === f.key ? 'selected' : ''}>${f.name}</option>`).join('')}
       </select>
     </div>
-    <div class="font-sample" id="font-sample">Vault 字体预览 · Aa Bb 123 · 春眠不觉晓，处处闻啼鸟。</div>
+    <div class="font-sample" id="font-sample">Vault 字体预览 · Aa Bb 123 · 春眠不觉晓，处处闻啼鸟。</div>`;
+
+  $$('[data-theme-pick]', pane).forEach((b) =>
+    b.addEventListener('click', () => {
+      applyTheme(b.dataset.themePick);
+      $$('[data-theme-pick]', pane).forEach((x) => x.classList.toggle('on', x === b));
+    })
+  );
+  const paintFontUI = () => {
+    $('#font-scale-val', pane).textContent = prefs.fontScale + '%';
+    $$('#font-presets [data-fs]', pane).forEach((x) => x.classList.toggle('on', +x.dataset.fs === +prefs.fontScale));
+  };
+  $('#font-minus', pane).addEventListener('click', () => { stepFontScale(-FONT_SCALE_STEP); paintFontUI(); });
+  $('#font-plus', pane).addEventListener('click', () => { stepFontScale(FONT_SCALE_STEP); paintFontUI(); });
+  $$('#font-presets [data-fs]', pane).forEach((b) =>
+    b.addEventListener('click', () => { setFontScale(+b.dataset.fs); toast('字号 ' + prefs.fontScale + '%', 'ok', 1200); paintFontUI(); })
+  );
+  const fontSample = $('#font-sample', pane);
+  const paintFontDesc = () => {
+    const f = FONT_FAMILIES.find((x) => x.key === prefs.fontFamily) || FONT_FAMILIES[0];
+    fontSample.title = f.desc; fontSample.dataset.desc = f.desc;
+  };
+  paintFontDesc();
+  $('#font-family', pane).addEventListener('change', (e) => {
+    prefs.fontFamily = e.target.value; applyFont(); paintFontDesc(); toast('字体已切换', 'ok', 1200);
+  });
+}
+
+/* ---------- 行为 ---------- */
+function renderSetBehavior(pane) {
+  pane.innerHTML = `
+    <div class="section-label" style="margin-top:0">安全</div>
     <div class="setting-row">
       <div><div class="label">自动锁定</div><div class="desc">无操作多久后自动上锁</div></div>
       ${seg('autolock', [[1, '1 分'], [5, '5 分'], [15, '15 分'], [30, '30 分'], [0, '关闭']])}
@@ -2879,36 +3120,120 @@ $('#menu-btn').addEventListener('click', async () => {
       <div><div class="label">剪贴板自动清除</div><div class="desc">复制密码后多久清空剪贴板</div></div>
       ${seg('clipClear', [[15, '15 秒'], [30, '30 秒'], [60, '60 秒'], [0, '关闭']])}
     </div>
-
+    <div class="section-label">回收站</div>
+    <div class="setting-row">
+      <div><div class="label">保留期限</div><div class="desc">超过期限的已删除条目下次启动时自动清除</div></div>
+      ${seg('trashDays', [[7, '7 天'], [30, '30 天'], [90, '90 天'], [0, '永不']])}
+    </div>
     <div class="section-label">组织</div>
     <div class="setting-row">
       <div><div class="label">保险库</div><div class="desc">当前 ${state.vaults.length} 个保险库 · ${state.folders.length} 个文件夹</div></div>
       <button class="ghost-btn sm" id="set-vaults">管理</button>
-    </div>
-    <div class="setting-row">
-      <div><div class="label">回收站保留</div><div class="desc">超过期限的已删除条目下次启动时自动清除</div></div>
-      ${seg('trashDays', [[7, '7 天'], [30, '30 天'], [90, '90 天'], [0, '永不']])}
-    </div>
+    </div>`;
+  bindSeg(pane);
+  $('#set-vaults', pane).addEventListener('click', openVaultManager);
+}
 
-    <div class="section-label">数据</div>
-    <div class="setting-row">
-      <div><div class="label">修改主密码</div><div class="desc">会用新密码重新加密整个库</div></div>
-      <button class="ghost-btn sm" id="set-pwd">修改</button>
-    </div>
-    <div class="setting-row">
-      <div><div class="label">导出加密备份</div><div class="desc">保存到桌面，可用主密码恢复</div></div>
-      <button class="ghost-btn sm" id="set-export">导出</button>
-    </div>
-    <div class="setting-row">
-      <div><div class="label">导出 CSV</div><div class="desc" style="color:var(--warn)">明文，慎用</div></div>
-      <button class="ghost-btn sm" id="set-csv">导出</button>
-    </div>
-    <div class="setting-row">
-      <div><div class="label">从 CSV 导入</div><div class="desc">支持 Chrome、Bitwarden、1Password 等格式</div></div>
-      <button class="ghost-btn sm" id="set-import">选择文件</button>
-    </div>
+/* ---------- 同步 ---------- */
+function renderSetSync(pane) {
+  const s = prefs.sync || (prefs.sync = { enabled: false, auto: true, token: '', user: '', server: SYNC_SERVER });
+  pane.innerHTML = `
+    <div class="section-label" style="margin-top:0">账号</div>
+    ${s.token ? `
+      <div class="setting-row">
+        <div><div class="label">${escapeHtml(s.user || '')}</div><div class="desc">已登录 · 服务端 ${escapeHtml(s.server)}</div></div>
+        <button class="ghost-btn sm danger" id="sync-logout">退出登录</button>
+      </div>` : `
+      <div class="sync-form">
+        <div class="field"><input id="sync-user" placeholder="用户名（3-32 位）" autocomplete="off"></div>
+        <div class="field"><input id="sync-pass" type="password" placeholder="密码（至少 8 位）"></div>
+        <div class="sync-form-acts">
+          <button class="primary" id="sync-login">登录</button>
+          <button class="ghost-btn" id="sync-register">注册新账号</button>
+        </div>
+        <p class="sync-hint">账号密码只用于登录同步服务，<b>主密码永远不会上传</b>。服务端只存加密后的密文，连服务器管理员也看不到你的密码。</p>
+      </div>`}
 
-    <div class="section-label">自动备份（${backups.length} 份）</div>
+    <div class="section-label">同步</div>
+    <div class="setting-row">
+      <div><div class="label">立即同步</div><div class="desc">拉取云端版本并与本地合并，再推送</div></div>
+      <button class="ghost-btn sm" id="sync-now" ${s.token ? '' : 'disabled'}>同步</button>
+    </div>
+    <div class="setting-row">
+      <div><div class="label">自动同步</div><div class="desc">每次修改保存后、以及解锁时自动同步</div></div>
+      <label class="switch"><input type="checkbox" id="sync-auto" ${s.auto ? 'checked' : ''} ${s.token ? '' : 'disabled'}><span></span></label>
+    </div>
+    <div class="sync-status" id="sync-status"></div>
+
+    <div class="section-label">最近同步记录</div>
+    <div class="sync-logs" id="sync-logs"><div class="bk-empty">加载中…</div></div>`;
+  $('#modal').classList.remove('hidden');
+
+  if (s.token) {
+    $('#sync-logout', pane).addEventListener('click', async () => {
+      const ok = await confirmDialog({ title: '退出同步账号？', desc: '本地数据不受影响，只是不再同步。', okText: '退出' });
+      if (!ok) return;
+      prefs.sync.token = ''; prefs.sync.user = ''; savePrefs(); renderSettings();
+    });
+    $('#sync-now', pane).addEventListener('click', () => doSync(true));
+    $('#sync-auto', pane).addEventListener('change', (e) => {
+      prefs.sync.auto = e.target.checked; savePrefs();
+      toast(e.target.checked ? '自动同步已开启' : '自动同步已关闭', 'ok', 1200);
+    });
+    refreshSyncStatus(pane);
+    loadSyncLogs(pane);
+  } else {
+    const submit = async (register) => {
+      const u = $('#sync-user', pane).value.trim(), p = $('#sync-pass', pane).value;
+      if (!u || !p) { toast('请输入用户名和密码', 'err'); return; }
+      const btn = register ? $('#sync-register', pane) : $('#sync-login', pane);
+      btn.disabled = true; btn.textContent = register ? '注册中…' : '登录中…';
+      try {
+        const r = await store.syncLogin(u, p, register);
+        prefs.sync.token = r.token; prefs.sync.user = r.user; prefs.sync.server = r.server; savePrefs();
+        toast(register ? '注册成功，已登录' : '登录成功', 'ok');
+        renderSettings();
+      } catch (e) { toast(String(e.message || e), 'err'); }
+      btn.disabled = false; btn.textContent = register ? '注册新账号' : '登录';
+    };
+    $('#sync-login', pane).addEventListener('click', () => submit(false));
+    $('#sync-register', pane).addEventListener('click', () => submit(true));
+    $('#sync-pass', pane).addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(false); });
+  }
+}
+
+async function refreshSyncStatus(pane) {
+  const el = $('#sync-status', pane); if (!el) return;
+  el.innerHTML = '<div class="desc">检查云端…</div>';
+  try {
+    const v = await store.syncVersion();
+    const localV = +(localStorage.getItem('vault.syncVersion') || 0);
+    el.innerHTML = `<div class="sync-stat"><span>云端 ${v.exists ? 'v' + v.version : '空'}</span><span>本地已知 v${localV}</span><span class="${v.version > localV ? 'warn' : 'ok'}">${!v.exists ? '尚未上传' : v.version > localV ? '云端有新版本' : '已是最新'}</span></div>`;
+  } catch (e) { el.innerHTML = `<div class="desc" style="color:var(--danger)">${escapeHtml(String(e.message || e))}</div>`; }
+}
+
+async function loadSyncLogs(pane) {
+  const el = $('#sync-logs', pane); if (!el) return;
+  try {
+    const r = await store.syncLogs();
+    el.innerHTML = r.list && r.list.length ? r.list.map((x) => `
+      <div class="sync-log-row">
+        <span class="bk-when">${fmtTime(x.createdAt)}</span>
+        <span class="bk-tag">${{ push: '推送', pull: '拉取', conflict: '冲突', register: '注册', login: '登录' }[x.action] || escapeHtml(x.action)}</span>
+        <span class="${x.result === 'ok' ? 'ok' : 'err'}">${x.result === 'ok' ? '成功' : '拒绝'}</span>
+        <span class="desc ellipsis">${escapeHtml(x.detail || '')}${x.clientName ? ' · ' + escapeHtml(x.clientName) : ''}</span>
+      </div>`).join('') : '<div class="bk-empty">还没有同步记录</div>';
+  } catch (e) { el.innerHTML = `<div class="bk-empty">${escapeHtml(String(e.message || e))}</div>`; }
+}
+
+/* ---------- 备份 ---------- */
+async function renderSetBackup(pane) {
+  pane.innerHTML = '<div class="bk-empty">加载中…</div>';
+  let backups = [], bkCfg = { primary: '', extra: null };
+  try { backups = await store.listBackups(); } catch (_) {}
+  try { bkCfg = await store.backupConfig(); } catch (_) {}
+  pane.innerHTML = `
+    <div class="section-label" style="margin-top:0">备份位置</div>
     <div class="bk-cfg">
       <div class="bk-cfg-row">
         <div class="bk-cfg-txt">
@@ -2931,6 +3256,7 @@ $('#menu-btn').addEventListener('click', async () => {
         </span>
       </div>
     </div>
+    <div class="section-label">备份列表（${backups.length} 份）</div>
     <div class="backup-list" id="backup-list">
       ${backups.length ? backups.map((b) => `
         <div class="backup-row">
@@ -2945,71 +3271,100 @@ $('#menu-btn').addEventListener('click', async () => {
             <button class="danger" data-del-bk="${escapeHtml(b.name)}" data-bk-dir="${b.dir}">删除</button>
           </span>
         </div>`).join('') : '<div class="bk-empty">首次保存后会自动生成</div>'}
-    </div>
-
-    <div class="modal-actions">
-      <button class="ghost-btn" id="set-close">关闭</button>
     </div>`;
+  const reopen = () => renderSettings();
 
-  $('#modal').classList.remove('hidden');
-  $('#set-close').addEventListener('click', closeModal);
-
-  $$('[data-theme-pick]', card).forEach((b) =>
-    b.addEventListener('click', () => {
-      applyTheme(b.dataset.themePick);
-      $$('[data-theme-pick]', card).forEach((x) => x.classList.toggle('on', x === b));
+  $$('#backup-list [data-restore-bk]', pane).forEach((b) =>
+    b.addEventListener('click', async () => {
+      const ok = await confirmDialog({
+        title: '从备份恢复？',
+        desc: '会覆盖当前全部数据，恢复后需要用<strong>该备份创建时的主密码</strong>重新解锁。覆盖前程序会先给当前数据留一份快照。',
+        okText: '恢复', danger: true,
+      });
+      if (!ok) return;
+      try {
+        await store.restore(b.dataset.restoreBk, b.dataset.bkDir);
+        closeSettings(); await doLock(true);
+        toast('已恢复，请用该备份时的主密码解锁', 'ok');
+      } catch (e) { toast(String(e.message || e), 'err'); }
     })
   );
-
-  /* 字体与大小 */
-  const paintFontUI = () => {
-    const val = $('#font-scale-val', card);
-    if (val) val.textContent = prefs.fontScale + '%';
-    $$('#font-presets [data-fs]', card).forEach((x) => x.classList.toggle('on', +x.dataset.fs === +prefs.fontScale));
-  };
-  $('#font-minus').addEventListener('click', () => { stepFontScale(-FONT_SCALE_STEP); paintFontUI(); });
-  $('#font-plus').addEventListener('click', () => { stepFontScale(FONT_SCALE_STEP); paintFontUI(); });
-  $$('#font-presets [data-fs]', card).forEach((b) =>
-    b.addEventListener('click', () => { setFontScale(+b.dataset.fs); toast('字号 ' + prefs.fontScale + '%', 'ok', 1200); paintFontUI(); })
-  );
-  const fontSample = $('#font-sample', card);
-  const paintFontDesc = () => {
-    const f = FONT_FAMILIES.find((x) => x.key === prefs.fontFamily) || FONT_FAMILIES[0];
-    fontSample.title = f.desc;
-    fontSample.dataset.desc = f.desc;
-  };
-  paintFontDesc();
-  $('#font-family').addEventListener('change', (e) => {
-    prefs.fontFamily = e.target.value;
-    applyFont();
-    paintFontDesc();
-    toast('字体已切换', 'ok', 1200);
-  });
-
-  $$('[data-pref]', card).forEach((b) =>
-    b.addEventListener('click', () => {
-      const key = b.dataset.pref;
-      prefs[key] = +b.dataset.v;
-      savePrefs();
-      $$(`[data-pref="${key}"]`, card).forEach((x) => x.classList.toggle('on', x === b));
-      if (key === 'autolock') { resetAutoLock(); toast('自动锁定已更新', 'ok'); }
+  $$('#backup-list [data-del-bk]', pane).forEach((b) =>
+    b.addEventListener('click', async () => {
+      const ok = await confirmDialog({
+        title: '删除这份备份？',
+        desc: `将删除 <strong>${escapeHtml(b.dataset.delBk)}</strong>，删除后无法找回。当前密码库不受影响。`,
+        okText: '删除', danger: true,
+      });
+      if (!ok) return;
+      try { await store.deleteBackup(b.dataset.delBk, b.dataset.bkDir); toast('已删除', 'ok', 1200); reopen(); }
+      catch (e) { toast(String(e.message || e), 'err'); }
     })
   );
-
-  $('#set-pwd').addEventListener('click', openChangePassword);
-  $('#set-vaults').addEventListener('click', openVaultManager);
-  $('#set-export').addEventListener('click', async () => {
-    try {
-      const p = await store.exportBackup();
-      toast('已导出：' + p, 'ok');
-    } catch (e) { toast(String(e.message || e), 'err'); }
+  $('#bk-pick', pane).addEventListener('click', async () => {
+    let p = null;
+    try { p = await store.pickBackupDir(); }
+    catch (_) {
+      const r = await promptDialog({
+        title: '输入备份目录', desc: '系统选择框不可用，直接填一个路径。目录不存在会自动创建。',
+        fields: [{ key: 'path', placeholder: '~/Documents/Vault Backups', value: '~/Documents/Vault Backups' }], okText: '使用',
+      });
+      p = r && r.path ? r.path.trim() : null;
+    }
+    if (!p) return;
+    try { await store.setBackupDir(p); toast('额外备份位置已更新', 'ok', 1200); reopen(); }
+    catch (e) { toast(String(e.message || e), 'err'); }
   });
-  $('#set-csv').addEventListener('click', async () => {
+  const defBtn = $('#bk-default', pane);
+  if (defBtn) defBtn.addEventListener('click', async () => {
+    try { await store.setBackupDir('~/Documents/Vault Backups'); toast('已设为 ~/Documents/Vault Backups', 'ok', 1200); reopen(); }
+    catch (e) { toast(String(e.message || e), 'err'); }
+  });
+  const clearBtn = $('#bk-clear', pane);
+  if (clearBtn) clearBtn.addEventListener('click', async () => {
+    const ok = await confirmDialog({ title: '清除额外备份位置？', desc: '只停止往那个目录继续写备份，<strong>已经存在的备份文件不会被删除</strong>。', okText: '清除' });
+    if (!ok) return;
+    try { await store.setBackupDir(null); toast('已清除额外位置', 'ok', 1200); reopen(); }
+    catch (e) { toast(String(e.message || e), 'err'); }
+  });
+  $$('[data-bk-open]', pane).forEach((b) =>
+    b.addEventListener('click', () => store.revealDir(b.dataset.bkOpen).catch((e) => toast(String(e.message || e), 'err')))
+  );
+}
+
+/* ---------- 数据 ---------- */
+function renderSetData(pane) {
+  pane.innerHTML = `
+    <div class="section-label" style="margin-top:0">主密码</div>
+    <div class="setting-row">
+      <div><div class="label">修改主密码</div><div class="desc">会用新密码重新加密整个库</div></div>
+      <button class="ghost-btn sm" id="set-pwd">修改</button>
+    </div>
+    <div class="section-label">导出</div>
+    <div class="setting-row">
+      <div><div class="label">导出加密备份</div><div class="desc">保存到桌面，可用主密码恢复</div></div>
+      <button class="ghost-btn sm" id="set-export">导出</button>
+    </div>
+    <div class="setting-row">
+      <div><div class="label">导出 CSV</div><div class="desc" style="color:var(--warn)">明文，慎用</div></div>
+      <button class="ghost-btn sm" id="set-csv">导出</button>
+    </div>
+    <div class="section-label">导入</div>
+    <div class="setting-row">
+      <div><div class="label">从 CSV 导入</div><div class="desc">支持 Chrome、Bitwarden、1Password 等格式</div></div>
+      <button class="ghost-btn sm" id="set-import">选择文件</button>
+    </div>
+    <p class="modal-sub" style="margin-top:16px">数据文件：${escapeHtml(state.meta.path || '-')}</p>`;
+  $('#set-pwd', pane).addEventListener('click', openChangePassword);
+  $('#set-export', pane).addEventListener('click', async () => {
+    try { const p = await store.exportBackup(); toast('已导出：' + p, 'ok'); }
+    catch (e) { toast(String(e.message || e), 'err'); }
+  });
+  $('#set-csv', pane).addEventListener('click', async () => {
     const ok = await confirmDialog({
       title: '导出明文 CSV？',
       desc: 'CSV 里的密码是<strong style="color:var(--danger)">未加密的明文</strong>，任何能读到这个文件的人都能看到。仅用于迁移到别的软件，完成后请立即删除。',
-      okText: '我明白，导出',
-      danger: true,
+      okText: '我明白，导出', danger: true,
     });
     if (!ok) return;
     const rows = [['name', 'url', 'username', 'password', 'category', 'notes']];
@@ -3018,105 +3373,105 @@ $('#menu-btn').addEventListener('click', async () => {
       rows.push([i.title, i.url, i.username, pwd, i.category, i.notes]);
     });
     const csv = rows.map((r) => r.map((c) => `"${String(c == null ? '' : c).replace(/"/g, '""')}"`).join(',')).join('\n');
-    try {
-      const p = await store.exportText('\ufeff' + csv, 'vault-plaintext.csv');
-      toast('已导出：' + p, 'ok');
-    } catch (e) { toast(String(e.message || e), 'err'); }
+    try { const p = await store.exportText('\ufeff' + csv, 'vault-plaintext.csv'); toast('已导出：' + p, 'ok'); }
+    catch (e) { toast(String(e.message || e), 'err'); }
   });
-  $('#set-import').addEventListener('click', () => $('#file-input').click());
+  $('#set-import', pane).addEventListener('click', () => $('#file-input').click());
+}
 
-  const reopenSettings = () => { closeModal(); setTimeout(() => $('#menu-btn').click(), 0); };
+/* ---------- 关于 ---------- */
+function renderSetAbout(pane) {
+  pane.innerHTML = `
+    <div class="about-hero">
+      <div class="about-logo">${LOGO_SVG}</div>
+      <div class="about-name">Vault</div>
+      <div class="about-ver">版本 ${APP_VERSION}</div>
+    </div>
+    <div class="setting-row">
+      <div><div class="label">检查更新</div><div class="desc" id="about-upd">定时自动检查，有新版本可一键安装</div></div>
+      <span class="about-upd-acts">
+        <button class="ghost-btn sm" id="about-check">检查</button>
+        <button class="primary sm" id="about-update-btn" disabled style="display:none">更新</button>
+      </span>
+    </div>
+    <div class="setting-row">
+      <div><div class="label">数据格式</div><div class="desc">AES-256-GCM · PBKDF2-SHA256 600,000 次 · 格式 v${DATA_VERSION}</div></div>
+    </div>
+    <p class="modal-sub" style="margin-top:14px">本地密码管理器，所有加密在你的设备上完成，服务端（如启用同步）只中转密文。</p>`;
+  $('#about-check', pane).addEventListener('click', () => checkForUpdate(true));
+}
 
-  $$('#backup-list [data-restore-bk]').forEach((b) =>
-    b.addEventListener('click', async () => {
-      const ok = await confirmDialog({
-        title: '从备份恢复？',
-        desc: '会覆盖当前全部数据，恢复后需要用<strong>该备份创建时的主密码</strong>重新解锁。覆盖前程序会先给当前数据留一份快照。',
-        okText: '恢复',
-        danger: true,
-      });
-      if (!ok) return;
-      try {
-        await store.restore(b.dataset.restoreBk, b.dataset.bkDir);
-        closeModal();
-        await doLock(true);
-        toast('已恢复，请用该备份时的主密码解锁', 'ok');
-      } catch (e) { toast(String(e.message || e), 'err'); }
-    })
-  );
+/* ---------------- 自动更新 ---------------- */
+/* 用 Tauri updater 插件，端点指向 GitHub Release 的 latest.json（CI 自动产出）。
+   策略：启动后 30s 查一次，之后每 6 小时一次；手动检查走同一条路径。 */
+const UPDATE_CHECK_INTERVAL = 6 * 3600 * 1000;
+let updateCheckTimer = null;
 
-  $$('#backup-list [data-del-bk]').forEach((b) =>
-    b.addEventListener('click', async () => {
-      const ok = await confirmDialog({
-        title: '删除这份备份？',
-        desc: `将删除 <strong>${escapeHtml(b.dataset.delBk)}</strong>，删除后无法找回。当前密码库不受影响。`,
-        okText: '删除',
-        danger: true,
-      });
-      if (!ok) return;
-      try {
-        await store.deleteBackup(b.dataset.delBk, b.dataset.bkDir);
-        toast('已删除', 'ok');
-        reopenSettings();
-      } catch (e) { toast(String(e.message || e), 'err'); }
-    })
-  );
-
-  $('#bk-pick').addEventListener('click', async () => {
-    let p = null;
-    try {
-      p = await store.pickBackupDir();
-    } catch (e) {
-      // 系统选择框不可用（或被策略禁用）时，退回手填
-      const r = await promptDialog({
-        title: '输入备份目录',
-        desc: '系统选择框不可用，直接填一个路径。目录不存在会自动创建。',
-        fields: [{ key: 'path', placeholder: '~/Documents/Vault Backups', value: '~/Documents/Vault Backups' }],
-        okText: '使用',
-      });
-      p = r && r.path ? r.path.trim() : null;
+async function checkForUpdate(manual = false) {
+  if (!IS_DESKTOP) { if (manual) toast('浏览器模式不支持更新', 'err'); return; }
+  const hint = document.querySelector('#about-upd');
+  const paint = (t) => { if (hint) hint.textContent = t; };
+  if (manual) paint('正在检查…');
+  try {
+    const { check } = window.__TAURI__.updater;
+    const update = await check();
+    if (!update.available) {
+      paint('已是最新版本（' + APP_VERSION + '）');
+      if (manual) toast('已是最新版本', 'ok', 1500);
+      return;
     }
-    if (!p) return;
-    try {
-      await store.setBackupDir(p);
-      toast('额外备份位置已更新', 'ok');
-      reopenSettings();
-    } catch (e) { toast(String(e.message || e), 'err'); }
-  });
+    const nv = update.version || (update.manifest || {}).version || '';
+    paint('发现新版本 ' + nv + '，点击「更新」安装');
+    toast('发现新版本 ' + nv + '，可在「设置 → 关于」里更新', 'ok', 4000);
+    const btn = document.querySelector('#about-update-btn');
+    if (btn) { btn.style.display = ''; btn.disabled = false; btn.textContent = '更新到 ' + nv; btn.onclick = () => installUpdate(update); }
+    else {
+      // 不在关于页时，把更新入口挂到侧栏，用户随时能点
+      let fab = document.querySelector('#upd-fab');
+      if (!fab) {
+        fab = document.createElement('button');
+        fab.id = 'upd-fab'; fab.className = 'upd-fab'; fab.textContent = '新版本 ' + nv;
+        fab.onclick = () => openSettings('about');
+        document.querySelector('.nav-foot') && document.querySelector('.nav-foot').prepend(fab);
+      }
+    }
+  } catch (e) {
+    const msg = String(e.message || e);
+    paint('检查失败：' + msg.slice(0, 80));
+    if (manual) toast('检查更新失败：' + msg, 'err', 3000);
+  }
+}
 
-  const defBtn = $('#bk-default');
-  if (defBtn) defBtn.addEventListener('click', async () => {
-    try {
-      await store.setBackupDir('~/Documents/Vault Backups');
-      toast('已设为 ~/Documents/Vault Backups', 'ok');
-      reopenSettings();
-    } catch (e) { toast(String(e.message || e), 'err'); }
+async function installUpdate(update) {
+  const ok = await confirmDialog({
+    title: '安装更新？',
+    desc: '下载完成后会自动重启应用。未保存的修改请先保存。',
+    okText: '下载并安装',
   });
-
-  const clearBtn = $('#bk-clear');
-  if (clearBtn) clearBtn.addEventListener('click', async () => {
-    const ok = await confirmDialog({
-      title: '清除额外备份位置？',
-      desc: '只停止往那个目录继续写备份，<strong>已经存在的备份文件不会被删除</strong>。',
-      okText: '清除',
+  if (!ok) return;
+  toast('正在下载更新…', '', 2000);
+  try {
+    await update.downloadAndInstall((ev) => {
+      if (ev.event === 'Started') toast('下载中… 0%', '', 60000);
+      else if (ev.event === 'Progress') {
+        if (ev.data.total) { const pct = Math.round(ev.data.chunkLength / ev.data.total * 100); toast('下载中… ' + pct + '%', '', 60000); }
+      } else if (ev.event === 'Finished') toast('下载完成，正在安装…', 'ok', 60000);
     });
-    if (!ok) return;
-    try {
-      await store.setBackupDir(null);
-      toast('已清除额外位置', 'ok');
-      reopenSettings();
-    } catch (e) { toast(String(e.message || e), 'err'); }
-  });
+    await window.__TAURI__.process.restart();
+  } catch (e) {
+    toast('更新失败：' + (e.message || e), 'err', 4000);
+  }
+}
 
-  $$('[data-bk-open]', card).forEach((b) =>
-    b.addEventListener('click', async () => {
-      try { await store.revealDir(b.dataset.bkOpen); }
-      catch (e) { toast(String(e.message || e), 'err'); }
-    })
-  );
-});
+function scheduleUpdateCheck() {
+  if (!IS_DESKTOP) return;
+  clearTimeout(updateCheckTimer);
+  const loop = () => { checkForUpdate(false).finally(() => { updateCheckTimer = setTimeout(loop, UPDATE_CHECK_INTERVAL); }); };
+  updateCheckTimer = setTimeout(loop, 30000);
+}
 
 function openVaultManager() {
+  returnToSettings = true;
   const card = $('#modal-card');
   card.classList.add('wide');
   card.innerHTML = `
@@ -3160,6 +3515,7 @@ function openVaultManager() {
 }
 
 function openChangePassword() {
+  returnToSettings = true;
   const card = $('#modal-card');
   card.classList.remove('wide');
   card.innerHTML = `

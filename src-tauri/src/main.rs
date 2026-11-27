@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use vault::sync;
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -378,6 +380,79 @@ fn save_vault(data: String, state: State<'_, AppState>) -> Result<(), String> {
     auto_backup(&state);
     let env = encrypt_with(key, &env_old.kdf.salt, env_old.kdf.iterations, data.as_bytes())?;
     write_atomic(&state.vault_path, &env)
+}
+
+/* ---------------- 云端同步 ---------------- */
+static SYNC_RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+
+fn sync_runtime() -> Result<tokio::runtime::Handle, String> {
+    if SYNC_RT.get().is_none() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("vault-sync")
+            .enable_all()
+            .build()
+            .map_err(|e| format!("初始化异步运行时失败：{e}"))?;
+        let _ = SYNC_RT.set(rt);
+    }
+    Ok(SYNC_RT.get().expect("sync runtime").handle().clone())
+}
+
+/// 在运行时线程上执行 future，当前线程阻塞等待结果（Tauri 命令是同步的）
+fn run_sync<F>(f: F) -> Result<F::Output, String>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let h = sync_runtime()?;
+    let (tx, rx) = std::sync::mpsc::channel::<F::Output>();
+    h.spawn(async move {
+        let _ = tx.send(f.await);
+    });
+    rx.recv().map_err(|_| "同步任务异常终止".to_string())
+}
+
+#[tauri::command]
+fn sync_login(server: String, username: String, password: String, register: bool) -> Result<sync::SyncAccount, String> {
+    run_sync(sync::login(server, username, password, register))?
+}
+
+#[tauri::command]
+fn sync_version(server: String, token: String) -> Result<sync::VersionInfo, String> {
+    let acct = sync::SyncAccount { server, token, user: String::new() };
+    run_sync(sync::version(acct))?
+}
+
+#[tauri::command]
+fn sync_push(server: String, token: String, base_version: u64, state: State<'_, AppState>) -> Result<u64, String> {
+    let acct = sync::SyncAccount { server, token, user: String::new() };
+    // 推送当前磁盘上的 Envelope（密文）。先确保 pending 的写入已落盘由前端保证。
+    let raw = std::fs::read_to_string(&state.vault_path).map_err(|e| format!("读取数据文件失败：{e}"))?;
+    let env: Envelope = serde_json::from_str(&raw).map_err(|_| "数据文件格式不正确".to_string())?;
+    let blob = serde_json::to_string(&env).map_err(|e| e.to_string())?;
+    run_sync(sync::push(acct, blob, base_version))?
+}
+
+#[tauri::command]
+fn sync_pull(server: String, token: String) -> Result<sync::PullResult, String> {
+    let acct = sync::SyncAccount { server, token, user: String::new() };
+    run_sync(sync::pull(acct))?
+}
+
+/// 用当前密钥解密远端 blob，返回明文 JSON 供前端合并。解不开 → Err（通常是主密码不一致）。
+#[tauri::command]
+fn sync_decrypt_blob(blob: String, state: State<'_, AppState>) -> Result<String, String> {
+    let guard = state.key.lock().map_err(|_| "内部状态异常".to_string())?;
+    let key = guard.as_ref().ok_or("尚未解锁")?;
+    let env: Envelope = serde_json::from_str(&blob).map_err(|_| "云端数据格式不正确".to_string())?;
+    let plain = decrypt_with(key, &env)?;
+    String::from_utf8(plain).map_err(|_| "云端数据不是有效文本".to_string())
+}
+
+#[tauri::command]
+fn sync_logs(server: String, token: String, limit: u32) -> Result<serde_json::Value, String> {
+    let acct = sync::SyncAccount { server, token, user: String::new() };
+    run_sync(sync::logs(acct, limit))?
 }
 
 #[tauri::command]
@@ -842,6 +917,8 @@ fn export_text(content: String, filename: String) -> Result<String, String> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let dir = app
                 .path()
@@ -865,6 +942,12 @@ fn main() {
             lock,
             save_vault,
             change_password,
+            sync_login,
+            sync_version,
+            sync_push,
+            sync_pull,
+            sync_decrypt_blob,
+            sync_logs,
             export_backup,
             list_backups,
             restore_backup,

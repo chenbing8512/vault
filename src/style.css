@@ -984,3 +984,57 @@ body.tag-dragging #folder-tree .nav-item.drop-ok {
 
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes pop { from { opacity: 0; transform: scale(0.96) translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* ---------------- 设置：分类分页 ---------------- */
+.modal-card.settings { width: 640px; padding: 0; overflow: hidden; display: flex; flex-direction: column; max-height: 86vh; }
+.settings-shell { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.settings-head { display: flex; align-items: center; gap: 10px; padding: 16px 22px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.settings-head h3 { margin: 0; font-size: 0.9688rem; font-weight: 600; }
+.settings-back { width: 28px; height: 28px; }
+.settings-back svg { width: 15px; height: 15px; }
+.settings-body { display: grid; grid-template-columns: 148px 1fr; flex: 1; min-height: 0; }
+.settings-nav { border-right: 1px solid var(--border); padding: 12px 10px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 0; }
+.settings-nav-item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px 12px; border-radius: 9px; text-align: left; color: var(--muted); }
+.settings-nav-item:hover { background: rgba(var(--tint), 0.06); color: var(--text); }
+.settings-nav-item.on { background: rgba(var(--accent-rgb), 0.12); color: var(--text); }
+.settings-nav-item .nm { font-size: 0.875rem; font-weight: 500; }
+.settings-nav-item .ds { font-size: 0.6875rem; color: var(--faint); }
+.settings-nav-item.on .ds { color: var(--muted); }
+.settings-pane { padding: 18px 22px 22px; overflow-y: auto; min-height: 0; }
+.settings-pane .section-label:first-child { margin-top: 0; }
+
+/* 同步 */
+.sync-form { display: flex; flex-direction: column; gap: 10px; margin-bottom: 6px; }
+.sync-form-acts { display: flex; gap: 8px; margin-top: 4px; }
+.sync-form-acts .primary { padding: 0 18px; height: 2.0625rem; font-size: 0.8125rem; }
+.sync-hint { font-size: 0.75rem; color: var(--faint); line-height: 1.6; margin: 6px 0 0; }
+.sync-hint b { color: var(--text); font-weight: 500; }
+.sync-status { margin-top: 6px; }
+.sync-stat { display: flex; gap: 14px; font-size: 0.75rem; color: var(--muted); padding: 8px 0 2px; }
+.sync-stat .ok { color: var(--ok); }
+.sync-stat .warn { color: var(--warn); }
+.sync-logs { display: flex; flex-direction: column; }
+.sync-log-row { display: grid; grid-template-columns: 4.6rem 2.6rem 2.4rem 1fr; gap: 8px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 0.75rem; }
+.sync-log-row:last-child { border-bottom: none; }
+.sync-log-row .ok { color: var(--ok); }
+.sync-log-row .err { color: var(--danger); }
+
+/* 开关 */
+.switch { position: relative; display: inline-block; width: 38px; height: 22px; flex-shrink: 0; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch span { position: absolute; inset: 0; background: var(--border-strong); border-radius: 11px; transition: background 0.18s; }
+.switch span::before { content: ''; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: transform 0.18s; }
+.switch input:checked + span { background: var(--accent); }
+.switch input:checked + span::before { transform: translateX(16px); }
+.switch input:disabled + span { opacity: 0.4; }
+
+/* 关于 */
+.about-hero { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 0 18px; }
+.about-logo { width: 44px; height: 44px; color: var(--accent); }
+.about-logo svg { width: 100%; height: 100%; }
+.about-name { font-size: 1.0625rem; font-weight: 600; margin-top: 4px; }
+.about-ver { font-size: 0.75rem; color: var(--faint); }
+.upd-fab { display:block; width:100%; margin-bottom:6px; padding:6px 8px; border-radius:8px; font-size:0.75rem; color:var(--on-accent); background:var(--accent); text-align:center; }
+.upd-fab:hover { filter:brightness(1.08); }
+.about-upd-acts { display:flex; gap:6px; }
+.primary.sm { padding:0 12px; height:1.875rem; font-size:0.75rem; }
