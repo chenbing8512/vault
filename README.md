@@ -33,6 +33,8 @@
 - **自动同步**：每次保存后、解锁后自动同步，也可在设置里手动触发或关闭
 - **约束**：两台设备必须用**同一个主密码**。改主密码后要先同步一次，否则另一台解不开
 
+![同步设置](https://cdn.jsdelivr.net/gh/chenbing8512/vault@main/docs/screenshot-sync.png)
+
 **自动更新（v1.7）**
 - 启动 30 秒后检查一次，之后每 6 小时；发现新版侧栏出现「新版本 x.y.z」，点了一键下载安装
 - 安装包经 Tauri 官方 updater 签名校验，签名私钥只存在 GitHub Secrets
